@@ -1,0 +1,25 @@
+{
+  "title": "Lock a stand mixer's bowl onto its clamping plate by its hidden bumps",
+  "category": "Societal relatability",
+  "keywords": [
+    "stand mixer",
+    "mixing bowl",
+    "clamping plate",
+    "hidden bumps",
+    "blind alignment",
+    "drop by feel",
+    "turn to lock",
+    "two-handed carry",
+    "baking",
+    "everyday"
+  ],
+  "instruction": "Put the mixing bowl on the stand mixer and lock it in place, then let go.",
+  "context": "Anyone who bakes with a tilt-head stand mixer puts its bowl on before each batch: the maker's manuals say to set the bowl on the bowl clamping plate and turn it clockwise, and the maker's help pages blame worn bumps when a bowl will not stay locked. The bumps are under the bowl's foot and the plate's slots are under the bowl's 22 cm body, so neither can be seen once the bowl is over the plate. The bowl, held level by its rim, must come down with all three bumps within a few degrees of the slots, which means remembering where the slots were and reading the bowl's turn from its handle, or turning it by feel until it drops 7 mm onto the plate. Only then does it turn: clockwise until the bumps are under the lips. Set down unturned, it sits on the plate looking fitted but lifts straight off. Unlike a bayonet cap or a portafilter, the parts that must mate are never in view while they are being aligned.",
+  "setup": "Cm from the midpoint between the arm bases (x forward, y to the robot's left), heights above the table. Stand mixer, free on the table on rubber feet (friction 0.9): a tilt-head 4.5 qt mixer of the KitchenAid K45SS's size (8.7 x 14.1 in footprint, 9.98 kg), white, head tilted back 60 degrees, no beater fitted, column away from the robot; the bowl clamping plate's centre at x 40, y 0. Pedestal 22.1 wide, 35 deep, 4.5 tall (estimate), column 9 x 12 x 21 at its back. Clamping plate, chrome, 15.2 across, top 4.8 above the table: an outer wall (inside 14.4 across, top 8.5 mm above the plate), and inside it, per 120 degrees: a 20 degree open slot, then clockwise a 30 degree channel 5.5 mm tall under a 3 mm lip that reaches 6 mm inward from the wall, then a solid 70 degree block as tall as the wall; slot centres at 93.6, 213.6 and 333.6 degrees (counter-clockwise from +x seen from above). Bowl, loose: 4.5 qt polished stainless steel bowl with handle (KitchenAid K45SBWH size: rim 22.2 across, 17.8 tall, 24.4 across the handle), 0.73 kg (estimate), friction 0.45; foot 12.8 across and 12 mm tall with three bumps 15 mm wide, 3 mm tall and 6 mm proud, 1.5 mm above the foot's bottom; handle loop on the side, 45 degrees counter-clockwise from one bump, so that a locked bowl has its handle to the front right. Start: the bowl stands upright on the table at x 14, y 0, its handle pointing toward the robot's right (direction x -0.42, y -0.91); both arms at their ready pose, grippers open.",
+  "scoring": "Read each step from the bowl's and the mixer's poses and the fingertip positions; in a real trial from a top photo, a ruler and a light upward tug by hand. 0 if the bowl was ever faster than 0.8 m/s (dropped or thrown) or below the table, or the mixer was moved more than 2 cm, turned or tilted more than 5 degrees. Seated: the bowl's foot within 1.5 mm of the plate's top, its axis within 3 mm of the plate's centre and tilted under 2 degrees. Locked: seated, with the bowl turned clockwise by 15.9 to 35.1 degrees from where its bumps are centred in the slots (each bump wholly under its lip, at most up against the stop). 1.0 (success): locked, no fingertip within about 3 cm of the bowl, and the bowl at rest (under 1 cm/s) for 1 s. 0.5: locked but still held or touched at the end. 0 otherwise, including a bowl seated but not turned, riding on the lips, or not on the plate.",
+  "run_limit": "2,400 steps (2 minutes at 20 Hz)",
+  "reset_notes": "Turn the bowl counter-clockwise until it lifts off, stand it on its mark on the table with its handle at the marked angle. Nothing is consumed.",
+  "fidelity": "PhysX rigid bodies at 240 Hz. Mixer and bowl are each one rigid body built from boxes and cylinders (round parts in 5-degree segments); bumps, slots, lips and stops are real colliders, so the bowl drops, turns and locks by contact alone. Clamping-plate and bump sizes are estimates from photos; the bowl's wall is 3 mm thick. The head is a fixed tilted-back block; no motor, beater or bowl-lift lever.",
+  "scores": "Dream-1 run: 0.0 (2,400 steps, seed 0); scripted demo: 1.0 (seeds 0 to 7, success at steps 510 to 610)",
+  "media": "M-UT5TJG"
+}

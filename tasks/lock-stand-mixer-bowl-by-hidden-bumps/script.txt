@@ -1,0 +1,162 @@
+import math
+import os
+import numpy as np
+
+GRIP_DZ = float(os.environ.get("MIX_GRIP_DZ", "0.012"))      # fingertip below the rim top
+INSERT = 33.6                                                  # slot centre minus stop position (deg), from the plate seen at the start
+
+
+def rz(a):
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+
+
+SLOPE = math.radians(float(os.environ.get("MIX_SLOPE", "11.2")))
+PITCH = math.radians(float(os.environ.get("MIX_PITCH", "40")))
+
+
+def down_rot(yaw=0.0, side=0):
+    """Fingers closing across the wall (radial, along y before the yaw); side +1 left grip, -1 right grip. The approach
+    leans outward to the wall's slope and forward by PITCH (the arms reach these poses only pitched forward)."""
+    t = SLOPE if side else 0.0
+    a = np.array([math.sin(PITCH), -side * math.sin(t), -math.cos(t) * math.cos(PITCH)])
+    a /= np.linalg.norm(a)
+    ey = np.array([0.0, 1.0, 0.0])
+    x = -(ey - ey.dot(a) * a)
+    x /= np.linalg.norm(x)
+    return rz(yaw) @ np.column_stack([x, np.cross(a, x), a])
+
+
+def yaw_of(st):
+    r = st.rotation()
+    return math.atan2(r[1, 0], r[0, 0])
+
+
+def log(ctx, msg):
+    print(f"[mix] k={ctx.k} {msg}", flush=True)
+
+
+def rigid_move(ctx, cur_pos, cur_yaw, goal_pos, goal_yaw, dur):
+    L, R = ctx.left, ctx.right
+    d = rz(goal_yaw - cur_yaw)
+    gens = [arm.move(goal_pos + d @ (arm.pos - cur_pos), d @ arm.rot, dur) for arm in (L, R)]
+    yield from both(*gens)
+
+
+def body(task, ctx):
+    L, R = ctx.left, ctx.right
+    L.offset = R.offset = np.zeros(3)
+    st = ctx.states()
+    bowl, mixer = st["bowl"], st["mixer"]
+    by = yaw_of(bowl)
+    log(ctx, f"start bowl {np.round(bowl.pos * 1000, 1).tolist()} yaw {math.degrees(by):.1f} mixer yaw {math.degrees(yaw_of(mixer)):.2f}")
+    rim = task.RIM_Z - GRIP_DZ
+    # grip the rim at the bowl's own 90 and 270 degrees (its turn read from the handle), so that from the carry to
+    # the locked pose the grips stay within the arms' reach (from 5 degrees short of to 45 degrees past square)
+    gy = by
+    gl = bowl.pos + rz(gy) @ np.array([0.0, 0.1085, 0.0]) + np.array([0, 0, rim])
+    gr = bowl.pos + rz(gy) @ np.array([0.0, -0.1085, 0.0]) + np.array([0, 0, rim])
+    rl, rr = down_rot(gy, 1), down_rot(gy, -1)
+    up = np.array([0, 0, 0.06])
+    yield from both(L.set_grip(1.0, 0.4), R.set_grip(1.0, 0.4))
+    yield from both(goto(ctx, L, gl + up, rl, 2.0), goto(ctx, R, gr + up, rr, 2.0))
+    yield from both(L.move(gl + L.offset, rl, 1.0), R.move(gr + R.offset, rr, 1.0))
+    log(ctx, f"ik worst mm L {L.worst_mm:.1f} R {R.worst_mm:.1f}"); L.worst_mm = R.worst_mm = 0.0
+    yield from both(L.set_grip(0.0, 0.8), R.set_grip(0.0, 0.8))
+    yield from wait(0.4)
+    yield from both(L.move(L.pos + np.array([0, 0, 0.10]), L.rot, 1.5), R.move(R.pos + np.array([0, 0, 0.10]), R.rot, 1.5))
+    yield from wait(0.4)
+    bowl = ctx.states()["bowl"]
+    log(ctx, f"ik worst mm L {L.worst_mm:.1f} R {R.worst_mm:.1f}"); L.worst_mm = R.worst_mm = 0.0
+    log(ctx, f"lifted bowl z {1000 * (bowl.pos[2] - task.TOP):.1f} mm tilt {math.degrees(math.acos(min(1, bowl.rotation()[2, 2]))):.2f}")
+    mixer = ctx.states()["mixer"]
+    c = mixer.to_world((0, 0, task.PT))
+    goal_yaw = yaw_of(mixer) + math.radians(INSERT)
+    hover = np.array([c[0], c[1], c[2] + (task.LIP_HI - task.PT) + 0.010])
+    yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), np.array([c[0], c[1], max(hover[2], bowl.pos[2])]), goal_yaw, 3.0)
+    for it in range(8):
+        yield from wait(0.4)
+        bowl = ctx.states()["bowl"]
+        e = bowl.pos - hover
+        ey = math.degrees(yaw_of(bowl) - goal_yaw)
+        log(ctx, f"align {it}: err mm {np.round(e * 1000, 1).tolist()} yaw {ey:.2f}")
+        if np.linalg.norm(e) < 0.001 and abs(ey) < 0.5:
+            break
+        yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), hover, goal_yaw, 0.6)
+    log(ctx, f"ik worst mm L {L.worst_mm:.1f} R {R.worst_mm:.1f}"); L.worst_mm = R.worst_mm = 0.0
+    # lower to 2 mm above the lips, re-centre, then down onto the plate
+    near_z = c[2] + (task.LIP_HI - task.PT) + 0.002
+    for it in range(4):
+        bowl = ctx.states()["bowl"]
+        yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), np.array([c[0], c[1], near_z]), goal_yaw, 0.8)
+        yield from wait(0.3)
+    bowl = ctx.states()["bowl"]
+    log(ctx, f"near: err mm {np.round((bowl.pos - np.array([c[0], c[1], near_z])) * 1000, 1).tolist()} "
+             f"yaw {math.degrees(yaw_of(bowl) - goal_yaw):.2f}")
+    tgt = np.array([c[0], c[1], c[2] - 0.002])
+    yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), tgt, yaw_of(bowl), 1.0)
+    yield from wait(0.5)
+    lk = task.locked(ctx.states()["bowl"], ctx.states()["mixer"])
+    log(ctx, f"lowered: {lk}")
+    # loosen the grip so the bowl settles under its own weight (a tilt held by the fingers keeps it on one lip)
+    yield from both(L.set_grip(0.6, 0.4), R.set_grip(0.6, 0.4))
+    yield from wait(0.6)
+    lk = task.locked(ctx.states()["bowl"], ctx.states()["mixer"])
+    log(ctx, f"settled: {lk}")
+    yield from both(L.set_grip(0.0, 0.5), R.set_grip(0.0, 0.5))
+    # by feel: if it rides on the lips, sweep the yaw slowly to and fro while pressing lightly, until it drops
+    sweep = [1.5, 3.0, -1.5, -3.0, 4.5, -4.5, 6.0, -6.0]
+    for dy in sweep:
+        if lk["down_mm"] < 2.0:
+            break
+        bowl = ctx.states()["bowl"]
+        yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), tgt, goal_yaw + math.radians(dy), 0.8)
+        yield from wait(0.3)
+        lk = task.locked(ctx.states()["bowl"], ctx.states()["mixer"])
+        log(ctx, f"sweep {dy:+.1f}: {lk}")
+    if os.environ.get("MIX_NAIVE"):   # baseline: set it down on the plate as it came and let go, no turning
+        yield from both(L.set_grip(1.0, 0.6), R.set_grip(1.0, 0.6))
+        yield from both(L.move(L.pos + np.array([0, 0, 0.08]), L.rot, 1.0), R.move(R.pos + np.array([0, 0, 0.08]), R.rot, 1.0))
+        yield from wait(3.0)
+        log(ctx, f"naive end: {task.report(ctx.states())}")
+        return
+    # turn clockwise to the stop, pressing lightly down
+    turn = math.radians(float(os.environ.get("MIX_TURN", str(INSERT + 3.0))))
+    bowl = ctx.states()["bowl"]
+    steps = 6
+    for i in range(steps):
+        bowl = ctx.states()["bowl"]
+        mixer = ctx.states()["mixer"]
+        target = yaw_of(mixer) + math.radians(INSERT) - turn * (i + 1) / steps
+        cpos = mixer.to_world((0, 0, task.PT - 0.0015))
+        yield from rigid_move(ctx, bowl.pos, yaw_of(bowl), cpos, target, 0.7)
+    yield from wait(0.6)
+    bowl, mixer = ctx.states()["bowl"], ctx.states()["mixer"]
+    log(ctx, f"turned: {task.locked(bowl, mixer)}")
+    log(ctx, f"ik worst mm L {L.worst_mm:.1f} R {R.worst_mm:.1f}"); L.worst_mm = R.worst_mm = 0.0
+    if os.environ.get("MIX_LIFTTEST"):   # check: lift the locked bowl 3 cm while holding it
+        z0 = ctx.states()["bowl"].pos[2]; m0 = ctx.states()["mixer"].pos[2]
+        yield from both(L.move(L.pos + np.array([0, 0, 0.03]), L.rot, 1.5), R.move(R.pos + np.array([0, 0, 0.03]), R.rot, 1.5))
+        yield from wait(0.5)
+        st = ctx.states()
+        log(ctx, f"lifttest: bowl rose {1000 * (st['bowl'].pos[2] - z0):.1f} mm, mixer rose {1000 * (st['mixer'].pos[2] - m0):.1f} mm")
+        yield from both(L.move(L.pos - np.array([0, 0, 0.03]), L.rot, 1.0), R.move(R.pos - np.array([0, 0, 0.03]), R.rot, 1.0))
+    yield from both(L.set_grip(1.0, 0.6), R.set_grip(1.0, 0.6))
+    yield from both(L.move(L.pos + np.array([0, 0, 0.08]), L.rot, 1.0), R.move(R.pos + np.array([0, 0, 0.08]), R.rot, 1.0))
+    yield from both(L.move(np.array([0.15, 0.30, task.TOP + 0.25]), L.rot, 1.5),
+                    R.move(np.array([0.15, -0.30, task.TOP + 0.25]), R.rot, 1.5))
+    yield from wait(1.5)
+    log(ctx, f"end: {task.report(ctx.states())}")
+
+
+def script(task, ctx):
+    ctx.k = 0
+    if os.environ.get("MIX_NOOP"):
+        for _ in range(int(os.environ.get("MIX_NOOP"))):
+            ctx.k += 1
+            yield
+        log(ctx, f"noop end: {task.report(ctx.states())}")
+        return
+    for x in body(task, ctx):
+        ctx.k += 1
+        yield x
