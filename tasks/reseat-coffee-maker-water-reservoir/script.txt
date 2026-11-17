@@ -1,0 +1,100 @@
+import math
+import os
+import numpy as np
+
+EFF = np.array([27.0, 27.0, 27.0, 7.0, 7.0, 7.0])
+PSI, PIT, FLIP = 0, 40, -1
+PINCH = 0.006          # TCP this far below the rim top: the pads (tips 13 mm further) cover the 22 mm band
+NAIVE_DX = float(os.environ.get("NAIVE_DX", "0"))   # baseline: set it down by its outline, this far off the seat
+
+
+def side_rot(psi, pitch):
+    a = np.array([math.cos(psi) * math.cos(pitch), math.sin(psi) * math.cos(pitch), -math.sin(pitch)])
+    x = np.array([-math.sin(psi), math.cos(psi), 0.0])
+    return np.column_stack([x, np.cross(a, x), a])
+
+
+def torque_watch(ctx):
+    sc = ctx.emb._env.unwrapped.scene
+    for side in ("left", "right"):
+        d = sc[f"{side}_robot"].data
+        tq = getattr(d.applied_torque, "torch", d.applied_torque)[0, :6].detach().cpu().numpy()
+        ctx.peak[side] = np.maximum(ctx.peak[side], np.abs(tq) / EFF)
+
+
+def watched(ctx, gen):
+    for _ in gen:
+        torque_watch(ctx)
+        yield
+
+
+def fmt(v):
+    return " ".join(f"{k} {x*1000:.1f}" if k != "tilt" else f"tilt {x:.2f}" for k, x in v.items())
+
+
+def script(task, ctx):
+    """Left arm only. It uses what the cameras show: the brewer's pose with the well on its ledge (seen before the
+    reservoir covers it) and the reservoir's pose."""
+    ctx.peak = {"left": np.zeros(6), "right": np.zeros(6)}
+    ctx.notes = [ctx.peak]
+    L = ctx.left
+    L.offset = np.zeros(3)
+    st = ctx.states()
+    br, rs = st["brewer"], st["reservoir"]
+    rim = (task.RW - task.RIM_T) / 2
+    Rg = side_rot(math.radians(PSI), math.radians(PIT)) @ np.diag([FLIP, FLIP, 1])
+    a = Rg[:, 2]
+    g0 = rs.to_world((0.0, rim, task.RH - PINCH))
+    yield from watched(ctx, L.set_grip(1.0, 0.4))
+    yield from watched(ctx, goto(ctx, L, g0 - 0.07 * a, Rg, 2.5))
+    yield from watched(ctx, L.move(g0 - 0.07 * a + L.offset, Rg, 0.4))
+    yield from watched(ctx, L.move(g0 + L.offset, Rg, 1.5))
+    yield from watched(ctx, L.set_grip(0.0, 0.8))
+    yield from watched(ctx, wait(0.3))
+    yield from watched(ctx, L.move(L.pos + np.array([0.0, 0.0, 0.07]), L.rot, 1.5))
+
+    # Goal: the reservoir's bottom centre on the seat, level and square to the brewer. Each move maps the hand
+    # through the reservoir's measured pose, so a reservoir that has turned a little in the pinch is corrected.
+    Rb = br.rotation()
+    seat = br.to_world((NAIVE_DX, task.SEAT_Y, task.LEDGE))
+    well = br.to_world((task.WX + NAIVE_DX, task.WY, task.LEDGE))
+
+    def corrected(goal_origin, p_hand, r_hand):
+        rs_ = ctx.states()["reservoir"]
+        M = Rb @ rs_.rotation().T
+        return goal_origin + M @ (p_hand - rs_.pos), M @ r_hand
+
+    above = seat + np.array([0.0, 0.0, 0.025])
+    p, r = corrected(above + np.array([0.0, 0.0, 0.03]), L.pos, L.rot)
+    yield from watched(ctx, L.move(p, r, 3.0))
+    yield from watched(ctx, L.move(p - np.array([0.0, 0.0, 0.03]), r, 1.0))
+    hand = {"cmd": L.pos.copy(), "r": L.rot.copy()}
+
+    def servo(goal, rounds, tol, dur=0.6, settle=0.6):
+        # bring the reservoir origin to ``goal`` (all three axes) from its measured pose: the loaded arm sags
+        for it in range(rounds):
+            yield from watched(ctx, wait(settle))
+            rs_ = ctx.states()["reservoir"]
+            e = rs_.to_world((task.VX, 0.0, -task.COL_H)) - (well + (goal - seat) - np.array([0.0, 0.0, task.COL_H]))
+            tilt = math.degrees(math.acos(min(1.0, rs_.rotation()[2, 2])))
+            ctx.notes.append(f"servo {round((goal - seat)[2] * 1000, 1)} mm: collar error {np.round(e * 1000, 1)} mm, tilt {tilt:.1f} deg")
+            if np.linalg.norm(e) < tol and tilt < 0.8:
+                return
+            hand["cmd"], hand["r"] = corrected(goal, hand["cmd"], hand["r"])
+            yield from watched(ctx, L.move(hand["cmd"], hand["r"], dur))
+
+    # hover with the collar mouth 3 mm over the ledge, lined up on the well (hidden under the reservoir now)
+    yield from servo(seat + np.array([0.0, 0.0, task.COL_H + 0.003]), 8, 0.0008)
+    # down into the well in steps, re-centring each step, then press 4 mm past the seat
+    for dz in (0.007, 0.005, 0.003, 0.001):
+        yield from servo(seat + np.array([0.0, 0.0, dz]), 2, 0.0006, dur=0.4, settle=0.3)
+    r = hand["r"]
+    yield from watched(ctx, L.move(hand["cmd"] - np.array([0.0, 0.0, 0.004]), r, 1.0))
+    yield from watched(ctx, wait(0.5))
+    ctx.notes.append("before release " + fmt(task.valve(ctx.states())))
+    yield from watched(ctx, L.set_grip(1.0, 0.8))
+    yield from watched(ctx, L.move(L.pos - 0.08 * r[:, 2], r, 1.5))
+    yield from watched(ctx, L.move(L.pos + np.array([-0.05, 0.05, 0.05]), r, 1.0))
+    yield from wait(1.5)
+    ctx.notes.append("end " + fmt(task.valve(ctx.states())))
+    ctx.notes.append("peak torque / effort left " + str(np.round(ctx.peak["left"], 2)))

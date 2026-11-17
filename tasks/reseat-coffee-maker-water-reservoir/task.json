@@ -1,0 +1,23 @@
+{
+  "title": "Seat a pod coffee maker's water reservoir back on its hidden valve",
+  "category": "Societal relatability",
+  "keywords": [
+    "kitchen",
+    "coffee maker",
+    "water reservoir",
+    "valve",
+    "blind alignment",
+    "hidden engagement",
+    "placement",
+    "everyday"
+  ],
+  "instruction": "Put the water reservoir back on the coffee maker, seated on its valve, and let go.",
+  "context": "Pod coffee makers with a removable side reservoir are in many homes and offices. The reservoir comes off to be rinsed or filled at the sink and goes back on the brewer's base ledge. A spring valve under its back end opens only when its collar drops into the valve well on the ledge; owners' troubleshooting advice for a brewer that will not pump is to reseat the reservoir until it sits flat. The well is hidden under the reservoir as it goes down, so the collar must be lined up before the reservoir covers it. Set down a few millimetres off, it stands on its collar, high and tilted, with the valve shut.",
+  "setup": "Metres; x forward from the line through the arm bases, y to the robot's left, z up from the table top; arm bases at (0, +0.305) and (0, -0.305). (1) Coffee maker, free, 4.4 kg, black, rubber feet (friction 0.9): body 338 mm deep (x 0.306 to 0.644), 170 mm wide (y -0.115 to +0.055), 330 mm tall, front toward the robot. On its left side (robot's left) a base ledge 30 mm tall, x 0.380 to 0.570, y 0.055 to 0.145. In the ledge a square valve well 26 x 26 mm, 10 mm deep, centred at (0.520, 0.094), with a 6 mm steel post standing 7 mm from its floor (top 3 mm below the ledge top). (2) Water reservoir, free, empty, lid off, 0.40 kg: clear blue copolyester tank 150 mm long (x), 75 mm wide, 240 mm tall, 2.5 mm walls, 3 mm floor, a 22 mm-tall, 5 mm-thick band along the top of both long sides. Under its floor, 45 mm behind its centre, a white square valve collar 22 x 22 mm (2 mm walls) standing 8 mm down, holding a 12 x 12 mm valve poppet 1 mm inside its mouth, sprung shut (5 mm travel, 300 N/m). Start: upright on the table, long side along x, collar toward the back, bottom centre at (0.255, 0.215); it rests on its collar and the front edge of its floor, leaning forward 4.2 degrees. Seated: bottom centre at (0.475, 0.094, ledge top), inner wall 1.5 mm from the brewer's side, collar in the well, poppet lifted 4 mm by the post. Both arms start at the ready pose, grippers open. Zero object jitter.",
+  "scoring": "Read every 50 ms step from the reservoir's and the coffee maker's poses, the poppet's lift and the grippers' positions. Zero for the rest of the run if the coffee maker moves more than 10 mm or tilts more than 3 degrees, or the reservoir falls faster than 0.9 m/s, leaves the table or turns upside down. At the end, every tier needs the reservoir released (each gripper's centre point 30 mm or more from its bounding box) and still (under 1 cm/s and 0.1 rad/s) for 1 s. 1.0: seated, that is collar inside the well (its centre within 2.5 mm of the well centre both ways and its mouth 3 mm or more below the ledge top), floor within 1.5 mm of the ledge top, tilt under 1.5 degrees and poppet lifted 3 mm or more. 0.5: collar inside the well but not seated (wedged or tilted). 0 otherwise, including standing beside the well on the ledge or anywhere else. Real trial: seated reads no gap under the reservoir with a 1.5 mm feeler at all four corners and the reservoir does not rock; collar in the well: a 5 N sideways push does not slide it. Success = 1.0 held for 1 s.",
+  "run_limit": "1,200 steps (60 s at 20 Hz), about 2.5x the 22-24 s scripted demo",
+  "reset_notes": "Lift the reservoir straight up off the ledge, stand it empty on the table at its start pose with the collar toward the back; return both arms to the ready pose. Nothing is consumed.",
+  "fidelity": "PhysX rigid bodies at 240 Hz, 20 Hz control. Coffee maker size and mass are the maker's figures; reservoir size and mass, collar, well, post and valve spring are estimates, as makers do not publish them. The round collar and well are squares here with 2 mm clearance; the valve poppet is a sprung slider that the post pushes open. The brewer body is a plain box. The lid is off (it is off for filling) and the reservoir is empty, without water.",
+  "scores": "Dream-1 run: 0.0 (1,200 steps, seed 0); scripted demo: 1.0 (seeds 0-7)",
+  "media": "M-KXZJE7"
+}
