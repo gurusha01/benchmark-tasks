@@ -138,7 +138,9 @@ SEAT_TOL_X = (SLOT[0] + ROD_R - 0.0005, SLOT[1] - ROD_R + 0.0005)   # rod centre
 SEAT_TOL_Z = (R_HOOK - 0.002, R_HOOK + 0.004)                       # rod resting on the slot floor
 FLAP_REST = (math.radians(40), math.radians(88))                    # flap lying on the bag's hard top
 HANDS_CLEAR = 0.06
-MOWER_MOVE = 0.005
+MOWER_TIP = math.radians(15)            # safety gate: a wheel off the bench (mower tipping)
+MOWER_END = 0.05                         # final placement: mower within 5 cm of where it started
+HOOK_HALF = 0.008                        # each hook (outer lip) is 16 mm wide along the rod
 _STATE: dict = {}
 
 
@@ -183,8 +185,8 @@ def _watch(environment) -> None:
     bag = _part_state(environment, BAG)
     if _STATE["m0"] is None:
         _STATE["m0"] = mower.pos.copy()
-    if np.linalg.norm(mower.pos - _STATE["m0"]) > MOWER_MOVE:
-        _STATE["gate"] = _STATE["gate"] or "mower moved"
+    if mower.rotation()[2, 2] < math.cos(MOWER_TIP):
+        _STATE["gate"] = _STATE["gate"] or "mower tipped"
     if bag.pos[2] < TOP - 0.05:
         _STATE["gate"] = _STATE["gate"] or "bag fell off the bench"
     if bag.rotation()[2, 2] < math.cos(math.radians(60)):
@@ -196,22 +198,25 @@ def _watch(environment) -> None:
 
 
 def rod_in_hooks(objects) -> dict:
-    """The bag's rod axis at each hook, in the mower frame (x, z), metres."""
+    """Where the bag's finite rod crosses each hook's plane: (x, z) in the mower frame and u, the crossing's position
+    along the rod from its centre (metres). The rod is 30 cm long; a hook counts only if the rod itself spans it."""
     mower, bag = objects["mower"], objects["bag"]
     out = {}
+    a = mower.to_local(bag.to_world((0.0, -ROD_LEN / 2, 0.0)))   # the rod's two ends
+    b = mower.to_local(bag.to_world((0.0, ROD_LEN / 2, 0.0)))
     for s in (1, -1):
-        # the point of the rod's axis nearest the hook's plane y = s * HOOK_Y (mower frame)
-        a = mower.to_local(bag.to_world((0.0, -0.1, 0.0)))
-        b = mower.to_local(bag.to_world((0.0, 0.1, 0.0)))
-        t = (s * HOOK_Y - a[1]) / (b[1] - a[1])
+        dy = b[1] - a[1]
+        t = (s * HOOK_Y - a[1]) / dy if abs(dy) > 1e-6 else -1.0
         p = a + t * (b - a)
-        out["L" if s > 0 else "R"] = (float(p[0]), float(p[2]))
+        out["L" if s > 0 else "R"] = (float(p[0]), float(p[2]), float((t - 0.5) * ROD_LEN))
     return out
 
 
 def seated(objects) -> bool:
+    """The rod rests in both hooks: the rod itself spans each hook's whole 16 mm width, and where it crosses the hook
+    its axis is inside the 21 mm slot and on the slot floor."""
     return all(SEAT_TOL_X[0] <= x <= SEAT_TOL_X[1] and SEAT_TOL_Z[0] <= z <= SEAT_TOL_Z[1]
-               for x, z in rod_in_hooks(objects).values())
+               and abs(u) <= ROD_LEN / 2 - HOOK_HALF for x, z, u in rod_in_hooks(objects).values())
 
 
 def _near_bag(bag, t) -> bool:
@@ -236,6 +241,8 @@ def _update(objects):
     still = float(np.linalg.norm(bag.lin_vel)) < 0.01 and float(np.linalg.norm(bag.ang_vel)) < 0.05
     if not (seated(objects) and still) or any(_near_bag(bag, t) for t in tcp):
         return 0.0, False
+    if _STATE.get("m0") is not None and float(np.linalg.norm((mower.pos - _STATE["m0"])[:2])) > MOWER_END:
+        return 0.0, False
     phi = mower.sliders["flap"]
     if FLAP_REST[0] <= phi <= FLAP_REST[1] and not any(_near_flap(mower, t) for t in tcp):
         return 1.0, True
@@ -247,9 +254,10 @@ def success(objects) -> bool:
 
 
 def score(objects) -> float:
-    """0 after a gate (mower moved over 5 mm, bag off the bench or tipped past 60 deg). Otherwise, at the end: 0.5 when
-    the bag's rod rests in both coupling hooks (rod axis inside each 21 mm slot, within 2 mm below to 4 mm above its
-    resting height on the slot floor), the bag is still and no fingertip is within 3 cm of it; 1.0 (success, held 1 s)
+    """0 after a gate (mower tipped past 15 deg, bag off the bench or tipped past 60 deg). Otherwise, at the end, with
+    the mower within 5 cm of where it started: 0.5 when the bag's 30 cm rod rests in both coupling hooks (the rod itself
+    spans each hook's 16 mm width; there its axis is inside the 21 mm slot, within 2 mm below to 4 mm above its resting
+    height on the slot floor), the bag is still and no fingertip is within 3 cm of it; 1.0 (success, held 1 s)
     when, in addition, the ejector flap rests between 40 and 88 deg on the bag and no fingertip is within 6 cm of the
     flap. Anything else scores 0."""
     return _update(objects)[0]
@@ -258,6 +266,8 @@ def score(objects) -> float:
 def report(objects) -> dict:
     return {"start_offset": _STATE.get("start"),
             "rod_in_hooks_mm": {k: [round(v * 1000, 1) for v in xz] for k, xz in rod_in_hooks(objects).items()},
+            "mower_shift_mm": (round(float(np.linalg.norm((objects["mower"].pos - _STATE["m0"])[:2])) * 1000, 1)
+                               if _STATE.get("m0") is not None else None),
             "seated": seated(objects), "flap_deg": round(math.degrees(_STATE.get("flap", 0.0)), 1),
             "max_flap_deg": round(math.degrees(_STATE.get("max_flap", 0.0)), 1), "gate": _STATE.get("gate"),
             "score": _update(objects)[0], "bag_pos_mm": [round(float(v) * 1000, 1) for v in objects["bag"].pos],
@@ -268,6 +278,6 @@ def debug_line(objects) -> str:
     h = rod_in_hooks(objects)
     b = objects["bag"]
     return (f"flap {math.degrees(_STATE.get('flap', 0)):.1f} rod " +
-            " ".join(f"{k}:({x*1000:.1f},{z*1000:.1f})" for k, (x, z) in h.items()) +
+            " ".join(f"{k}:({x*1000:.1f},{z*1000:.1f},u{u*1000:.0f})" for k, (x, z, u) in h.items()) +
             f" bag {np.round(b.pos, 3)} v {np.round(b.lin_vel, 3)} tilt {math.degrees(math.acos(min(1.0, b.rotation()[2, 2]))):.1f}"
             f" gate {_STATE.get('gate')} score {_update(objects)[0]}")

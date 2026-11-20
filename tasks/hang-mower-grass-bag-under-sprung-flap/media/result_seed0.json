@@ -28,13 +28,16 @@
     "rod_in_hooks_mm": {
       "L": [
         -16.0,
-        330.0
+        330.0,
+        88.2
       ],
       "R": [
         -15.8,
-        330.0
+        330.0,
+        -71.8
       ]
     },
+    "mower_shift_mm": 0.0,
     "seated": true,
     "flap_deg": 61.9,
     "max_flap_deg": 108.9,

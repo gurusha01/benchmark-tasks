@@ -31,11 +31,42 @@ There is no latch, joint or proximity trigger between bag and mower. The rod is 
 hook is an open-topped slot (a floor plate standing out from the rear face, an outer lip with a flared top, and the
 rear face itself). The rod stays in the hooks
 only because gravity holds it on the slot floors, and the flap lies on the bag's hard top by contact. `seated()` in
-`task.py` only measures where the rod's axis is.
+`task.py` only measures where the rod is.
+
+## 3b. Revision after review (TK-T44K53)
+
+**Finite rod.** `rod_in_hooks()` takes the rod's two real ends (30 cm apart) and finds where the rod itself crosses
+each hook's plane, with u = the crossing's distance along the rod from its centre. `seated()` requires, at both hooks,
+|u| <= 15 cm - 8 mm (the rod spans the hook's whole 16 mm width) and, there, the axis inside the 21 mm slot and on the
+slot floor. Static check (`media/check_rod.py`: a bag seated in both hooks, then slid sideways along them):
+
+| Sideways shift (mm) | 0 | 30 | 60 | 62 | 66 | 80 | 120 | 300 |
+|---|---|---|---|---|---|---|---|---|
+| Old scorer (axis extended past the rod's ends) | seated | seated | seated | seated | seated | seated | seated | seated |
+| New scorer (finite rod) | seated | seated | seated | no | no | no | no | no |
+
+**Mower movement.** The permanent zero for moving the mower more than 5 mm is gone. The gate is now the mower tipping
+past 15 deg (a wheel off the bench); at the end the mower must be within 5 cm of where it started (final placement).
+Fitting is measured in the mower's own frame, so a small bump does not change whether the bag is fitted.
 
 ## 4. Demo and baselines in the simulator
 
 Scripted demo, final task and script, one trial per seed (seed draws the bag's start offset: dx, dy, yaw):
+
+Re-run with the revised scorer (Nov 20):
+
+| Seed | Start offset (mm, mm, deg) | Score | Steps to success | Rod at left / right hook (x, z, u; mm) | Mower shift (mm) | Flap at end |
+|---|---|---|---|---|---|---|
+| 0 | -2.3, -3.6, 0.25 | 1.0 | 869 | -16.0, 330.0, 88 / -15.8, 330.0, -72 | 0.0 | 61.9 deg |
+| 1 | -4.8, 8.6, 0.05 | 1.0 | 873 | -15.8, 330.0, 65 / -15.7, 330.0, -95 | 0.0 | 61.9 deg |
+| 2 | -2.2, 3.6, -0.31 | 1.0 | 864 | -15.7, 330.0, 70 / -15.8, 330.0, -90 | 0.1 | 61.9 deg |
+| 3 | -4.6, -1.7, -0.76 | 1.0 | 868 | -15.6, 330.0, 92 / -15.6, 330.0, -68 | 0.1 | 61.9 deg |
+| 4 | -2.3, 6.0, 1.83 | 1.0 | 864 | -15.8, 330.0, 70 / -15.7, 330.0, -90 | 0.1 | 61.9 deg |
+| 5 | -3.1, -2.2, 1.09 | 1.0 | 869 | -15.9, 330.0, 88 / -15.7, 330.0, -72 | 0.1 | 61.9 deg |
+| 6 | -0.3, -7.1, 1.14 | 1.0 | 870 | -15.9, 330.0, 78 / -15.7, 330.0, -82 | 0.0 | 61.9 deg |
+| 7 | -4.5, 9.1, 1.00 | 1.0 | 871 | -16.0, 330.0, 73 / -15.8, 330.0, -87 | 0.2 | 61.9 deg |
+
+Every rod crossing is at |u| 65 to 95 mm, inside the 142 mm limit. First submission run (old scorer):
 
 | Seed | Start offset (mm, mm, deg) | Camera estimate of rod x / centre y / heading | Score | Steps to success | Rod in hooks (x, z, mower frame, mm) | Flap at end |
 |---|---|---|---|---|---|---|
@@ -58,15 +89,21 @@ every seed (the rod on the lips' flared tops), and the rod dropped into the slot
 
 Baselines (2,400 steps each, `--no-record`):
 
-| Run | Score | Gate | Rod at the end (x, z, mm) |
-|---|---|---|---|
-| Do nothing, seed 0 | 0.0 | - | -188, 284 (bag where it started) |
-| Do nothing, seed 1 | 0.0 | - | -190, 284 |
-| Random joint targets, seeds 0 / 1 / 2 | 0.0 / 0.0 / 0.0 | - | bag pushed about, never on the hooks |
-| Random reaches and grasps, seeds 0 / 1 / 2 | 0.0 / 0.0 / 0.0 | mower moved (all three) | bag never on the hooks |
+| Run | Score | Gate | Rod at the end, left / right hook (x, z, u; mm) | Mower shift (mm) |
+|---|---|---|---|---|
+| Do nothing, seed 0 | 0.0 | - | -188, 284, 83 / -187, 284, -78 (bag where it started) | 0.0 |
+| Do nothing, seed 1 | 0.0 | - | -190, 284, 71 / -190, 284, -89 | 0.0 |
+| Random joint targets, seed 0 | 0.0 | - | -187, 284, 55 / -178, 284, -105 | 0.0 |
+| Random joint targets, seed 1 | 0.0 | - | -229, 283, 8 / -168, 283, -164 | 1.2 |
+| Random joint targets, seed 2 | 0.0 | - | -37, 282, 228 / -96, 289, 58 | 0.0 |
+| Random reaches and grasps, seed 0 | 0.0 | - | -207, 284, 121 / -203, 284, -39 | 17.3 |
+| Random reaches and grasps, seed 1 | 0.0 | mower tipped | -129, 281, -126 / -136, 281, -286 | 84.8 |
+| Random reaches and grasps, seed 2 | 0.0 | - | -158, 285, -153 / -191, 278, -316 | 138.8 |
 
-No baseline reached either rung. The random reaches knock the mower (13.2 kg, free on the bench) more than 5 mm,
-which is itself a gate.
+No baseline reached either rung under the revised scorer: the bag never reached the hooks. One random-reach run tipped
+the mower (gate); two shoved it 17 and 139 mm.
+
+Dream-1 (first submission, seed 0): the bag ends where it started (see its top-camera video in media upload M-6DZPBK; its last frame matches the first), so it scores 0.0 under the revised scorer too.
 
 ## 5. The demo uses only observable inputs
 
