@@ -1,0 +1,23 @@
+{
+  "title": "Set a laser receiver on a grade rod to grade, the rod held plumb on its stake",
+  "category": "Impact on jobs",
+  "keywords": [
+    "grade rod",
+    "laser receiver",
+    "grade stake",
+    "plumb",
+    "bubble level",
+    "rod clamp",
+    "bimanual",
+    "construction layout"
+  ],
+  "instruction": "Hold the grade rod plumb on the stake by its bubble and clamp the laser receiver on the rod where it reads on grade.",
+  "context": "Construction laborers (O*NET 47-2061, 892,690 employed, BLS OEWS May 2024) set and check grade with a rotary laser: the rod's shoe goes on the grade stake, the rod is held plumb by its bubble, and the receiver is slid along it until the display reads on grade, then clamped. Every grade set later off that rod copies this reading, so a rod off the stake top, off plumb, or a receiver that slips puts a whole slab, footing or trench at the wrong height.",
+  "setup": "Station table; positions in cm from the midpoint between the arm bases (x forward, y to the robot's left), arm bases at y +-30.5. Tray of compacted soil (sRGB 107, 84, 61), 28 x 28 x 4 cm, 25 kg, centred at x 30, y 0, free on the bench. Grade stake: 2x2 wood (194, 153, 102), 38 mm square, its top 2.5 cm proud of the soil (6.5 cm above the bench) at x 30, y 0, with a tack and a blue paint line. Grade rod: two-section fibreglass rod collapsed to 1.32 m (cream 237, 230, 204; 25 x 44 mm section; 1.3 kg), brass shoe, black graduations on the face toward the robots, a round bubble level (1 deg circle) on a bracket 50 cm up that face. Its shoe stands on the stake top (within 4 mm of centre) and it leans about 13 deg toward +x on a 4x4 post (89 mm, top 1.0 m above the bench) set in a 20 cm bucket of concrete at x 60, y 0 (30 kg). Laser receiver (Spectra Precision HR320 class; yellow 242, 199, 25; 16.5 x 7.5 x 4 cm, 0.38 kg) clamped on the rod beside it on the robot's right, photocell centre marked by side notches; back display near its top: top mark red = above the laser plane, middle green = on grade (+-3 mm), bottom blue = below, none lit beyond +-25 mm. The rod clamp's orange wing knob faces the robots: a quarter turn anticlockwise (seen from behind) loosens it, clockwise tightens it. The receiver starts 12 to 22 mm above or below grade. Rotary laser on a tripod at x 62, y -30: its plane is 21.5 cm above the stake top.",
+  "scoring": "Score 0 if at any point the rod tips past 45 deg or falls, or the receiver comes off the rod. At the end: 0.5 when the receiver is clamped on the rod at the grade mark (its photocell centre within 4 mm of the laser plane's height above the stake top, measured along the rod from the bottom of its shoe: the display's 3 mm band plus 1 mm for how the shoe seats), the clamp's wing knob is tight (within 8 deg of its stop), no fingertip is within 3 cm of the receiver, and rod and receiver each moved less than 5 mm over the last 0.5 s. 1.0 (success, held 1 s): that, and the rod's shoe stands on the stake top (shoe centre over the 38 mm square top, resting on it) with the rod plumb within its bubble's 1 deg circle. Otherwise 0, including doing nothing.",
+  "run_limit": "2,400 steps (2 min 00 s at 20 Hz)",
+  "reset_notes": "Loosen the clamp, set the receiver 12 to 22 mm above or below the grade mark (the seed draws which and how far), tighten it. Stand the rod's shoe on the stake top within 4 mm of centre and lean the rod back on the post. Leave the laser running at the same height.",
+  "fidelity": "PhysX 240 Hz. The rod is one rigid 1.32 m body; its section and 1.3 kg are estimates. The receiver rides on the rod by contact: its clamp jaw is a sprung slider whose force follows the wing knob's angle (quarter turn, estimated). The laser beam, the receiver's three marks and the bubble are code-driven from the receiver's height and the rod's tilt. Receiver size and mass are estimates; the laser is set low on its tripod to keep the grade mark in reach.",
+  "scores": "Dream-1 run: 0.0 (2,400 steps, seed 0); scripted demo: 1.0 (seeds 0-7, success at steps 920-1751); do nothing, random joints, random reaches: 0.0",
+  "media": "M-T72FY5"
+}

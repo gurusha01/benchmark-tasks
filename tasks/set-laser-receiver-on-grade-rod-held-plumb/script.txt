@@ -1,0 +1,361 @@
+# Scripted demo: set the laser receiver on the grade rod to grade, the rod held plumb on the stake.
+#
+# Inputs, all observable: top-camera images (where the receiver body is; which LED mark is lit), the arms' own joint
+# angles (forward kinematics) and the site layout from the task's setup text (stake, where the rod stands, its size,
+# the clamp's wing knob). It never reads the simulator's object poses, the laser plane's height or the clamp's joints.
+#
+# 1. Left arm: grip the rod across its thickness from the left, 38 cm up from the shoe, the pads square to its lean
+#    (the flat pads set the rod's direction to the gripper's). Swing it upright about its shoe, lift it 3.5 cm, carry
+#    it over the stake and set the shoe down on the stake top. The gripper is then held vertical: the rod is plumb.
+#    At the end it reads the round level on the top image and walks the rod's top toward the bubble until
+#    the bubble sits in its circle.
+# 2. Find the receiver on the top image (its yellow body), so the right arm knows its height on the rod.
+# 3. Right arm: pinch the clamp's wing knob, turn it a quarter turn back to loosen, then slide the receiver along the
+#    rod by the knob, reading the LED marks on the top image: top (red) lit means too high, bottom (blue) too low,
+#    middle (green) on grade. Always reach the green band from below (from above, slide on through it until the
+#    bottom mark lights), stop 0.5 mm into it, turn the knob a quarter turn to tighten,
+#    let go and back off. The left arm keeps holding the rod plumb on the stake.
+import math
+import numpy as np
+
+
+def Ry(t):
+    c, s = math.cos(t), math.sin(t)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+
+def Rx(t):
+    c, s = math.cos(t), math.sin(t)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+def side_grip(lean):
+    """Left gripper: approach along -y (level), fingers closing along x, turned about y by the rod's lean."""
+    a = np.array([0.0, -1.0, 0.0])
+    x = np.array([-1.0, 0.0, 0.0])
+    return Ry(lean) @ np.column_stack([x, np.cross(a, x), a])
+
+
+def knob_grip(roll):
+    """Right gripper: approach along +x (level), fingers closing along y, rolled about x by ``roll``."""
+    a = np.array([1.0, 0.0, 0.0])
+    x = np.array([0.0, -1.0, 0.0])
+    return Rx(roll) @ np.column_stack([x, np.cross(a, x), a])
+
+
+class TopCam:
+    def __init__(self, img):
+        from yam_arena import station
+        from yam_arena.urdf import quat_xyzw_to_matrix
+
+        cam = station.top_camera("calibrated")
+        self.ln = cam.lens
+        self.H, self.W = img.shape[:2]
+        self.sx, self.sy = self.W / self.ln.width, self.H / self.ln.height
+        self.R = quat_xyzw_to_matrix(np.array(cam.rot_xyzw))
+        self.p0 = np.array(cam.pos)
+
+    def project(self, P):
+        pc = self.R.T @ (np.asarray(P, float) - self.p0)
+        u = self.ln.fx * (pc[0] / -pc[2]) + self.ln.cx
+        v = self.ln.cy - self.ln.fy * (pc[1] / -pc[2])
+        return u * self.sx, v * self.sy
+
+    def rays(self):
+        vv, uu = np.mgrid[0:self.H, 0:self.W]
+        u, v = (uu + 0.5) / self.sx, (vv + 0.5) / self.sy
+        d = np.stack([(u - self.ln.cx) / self.ln.fx, -(v - self.ln.cy) / self.ln.fy, -np.ones_like(u)], -1) @ self.R.T
+        return d
+
+
+LIT = {"high": lambda r, g, b: (r > 150) & (g < 0.25 * r) & (b < 0.35 * r),
+       "on": lambda r, g, b: (g > 120) & (r < 0.55 * g) & (b < 0.7 * g),
+       "low": lambda r, g, b: (b > 140) & (r < 0.45 * b) & (g < 0.75 * b)}
+
+
+def receiver_from_marks(task, img):
+    """(height of the receiver's centre, lit mark, pixel count) from the top image: the lit LED's pixels cast onto the
+    plane of the display face (the rod stands on the stake, so that face is at a known x)."""
+    cam = TopCam(img)
+    d = cam.rays()
+    g = img.astype(float)
+    xf = task.SX - task.RCV_D / 2 - 0.002
+    t = (xf - cam.p0[0]) / d[..., 0]
+    P = cam.p0 + t[..., None] * d
+    near = (np.abs(P[..., 1] - (task.SY + task.RCV_Y)) < 0.04) & (P[..., 2] > task.TOP + 0.1) & \
+        (P[..., 2] < task.TOP + 0.45)
+    best = None
+    for k, f in LIT.items():
+        m = f(g[..., 0], g[..., 1], g[..., 2]) & near
+        if best is None or m.sum() > best[2]:
+            best = (k, m, int(m.sum()))
+    k, m, n = best
+    if n < 5:
+        raise RuntimeError("no lit mark found on the receiver")
+    return float(np.median(P[m][:, 2])) - task.LED_Z[k], k, n
+
+
+def knob_from_wrist(task, ctx, arm, img, fk):
+    """(y, z) of the wing knob's axis from the right wrist camera, looking at the knob from behind: the orange wing's
+    pixels cast onto the wing's back face (a plane square to the view)."""
+    from yam_arena import station
+    from yam_arena.constants import TCP_OFFSET
+    from yam_arena.urdf import quat_xyzw_to_matrix
+
+    cam = station.wrist_camera(arm.name)
+    ptcp, Rg = fk(arm)
+    g0 = ptcp - Rg @ np.array(TCP_OFFSET)
+    Rc = Rg @ quat_xyzw_to_matrix(np.array(cam.rot_xyzw))
+    p0 = g0 + Rg @ np.array(cam.pos)
+    ln = cam.lens
+    H, W = img.shape[:2]
+    sx, sy = W / ln.width, H / ln.height
+    vv, uu = np.mgrid[0:H, 0:W]
+    u, v = (uu + 0.5) / sx, (vv + 0.5) / sy
+    d = np.stack([(u - ln.cx) / ln.fx, -(v - ln.cy) / ln.fy, -np.ones_like(u)], -1) @ Rc.T
+    xw = task.SX + task.KNOB_X - 0.009
+    t = (xw - p0[0]) / d[..., 0]
+    P = p0 + t[..., None] * d
+    c = img.astype(float)
+    r, gg, b = c[..., 0], c[..., 1], c[..., 2]
+    orange = (r > 160) & (gg > 0.3 * r) & (gg < 0.62 * r) & (b < 0.25 * r) & (t > 0)
+    pts = P[orange]
+    if len(pts) < 30:
+        raise RuntimeError(f"knob not found on the wrist image ({len(pts)} px)")
+    return float(np.median(pts[:, 1])), 0.5 * float(np.percentile(pts[:, 2], 2) + np.percentile(pts[:, 2], 98)), len(pts)
+
+
+def find_receiver(task, img, y_rod):
+    """Height (world z) of the receiver body's centre: its yellow pixels cast onto the vertical plane through the
+    body's centre line (y = rod + RCV_Y), keeping those that land beside the rod."""
+    cam = TopCam(img)
+    d = cam.rays()
+    g = img.astype(float)
+    yellow = (g[..., 0] > 150) & (g[..., 1] > 110) & (g[..., 2] < 90) & (g[..., 1] < 0.92 * g[..., 0]) \
+        & (g[..., 1] > 0.6 * g[..., 0])
+    yb = y_rod + task.RCV_Y
+    t = (yb - cam.p0[1]) / d[..., 1]
+    P = cam.p0 + t[..., None] * d
+    sel = yellow & (np.abs(P[..., 0] - task.SX) < 0.05) & (P[..., 2] > task.TOP) & (P[..., 2] < task.TOP + 0.6)
+    pts = P[sel]
+    if len(pts) < 20:
+        raise RuntimeError(f"receiver not found ({len(pts)} px)")
+    # the body's visible faces are its back (toward the camera) and top: its middle height is between the extremes
+    z_lo, z_hi = np.percentile(pts[:, 2], 2), np.percentile(pts[:, 2], 98)
+    return 0.5 * (z_lo + z_hi), len(pts), z_hi - z_lo
+
+
+def read_marks(task, img, centre):
+    """Which LED mark is lit on the receiver's back display ('high', 'on', 'low' or None), from the top image: lit
+    pixels cast onto the display face's plane, kept only where the display can be (above the receiver's centre)."""
+    cam = TopCam(img)
+    d = cam.rays()
+    g = img.astype(float)
+    t = (centre[0] - cam.p0[0]) / d[..., 0]
+    P = cam.p0 + t[..., None] * d
+    near = (np.abs(P[..., 1] - centre[1]) < 0.04) & (P[..., 2] > centre[2] - 0.01) & (P[..., 2] < centre[2] + 0.10)
+    counts = {k: int((f(g[..., 0], g[..., 1], g[..., 2]) & near).sum()) for k, f in LIT.items()}
+    k = max(counts, key=counts.get)
+    return (k if counts[k] >= 3 else None), counts
+
+
+def read_bubble(task, img):
+    """Where the bubble sits on the round level's vial, from the top image: (dx, dy) in metres in the world's
+    horizontal plane, from the vial's centre to the dark bubble, and the vial's pixel count. The vial top is the pale
+    green square at the known spot on the rod's face toward the robot (the shoe stands on the stake)."""
+    cam = TopCam(img)
+    c = np.array([task.SX + task.BUBBLE_X, task.SY, task.TOP + task.Z_STAKE + task.BUBBLE_U + 0.0108])
+    u0, v0 = cam.project(c)
+    H, W = img.shape[:2]
+    r = 14
+    ua, ub = max(0, int(u0) - r), min(W, int(u0) + r + 1)
+    va, vb = max(0, int(v0) - r), min(H, int(v0) + r + 1)
+    g = img[va:vb, ua:ub].astype(float)
+    R, G, B = g[..., 0], g[..., 1], g[..., 2]
+    lum = (R + G + B) / 3
+    green = (lum > 190) & (G >= R + 3) & (G >= B + 3)
+    if green.sum() < 6:
+        raise RuntimeError(f"bubble vial not found ({int(green.sum())} px)")
+    vv, uu = np.nonzero(green)
+    v1, v2, u1, u2 = vv.min(), vv.max(), uu.min(), uu.max()
+    box = np.zeros_like(green)
+    box[v1:v2 + 1, u1:u2 + 1] = True
+    dark = box & (lum < 0.7 * float(np.median(lum[green])))
+    uc, vc = 0.5 * (u1 + u2), 0.5 * (v1 + v2)
+    if dark.sum() == 0:
+        du = dv = 0.0
+    else:
+        dv_, du_ = np.nonzero(dark)
+        du, dv = du_.mean() - uc, dv_.mean() - vc
+    # pixels per metre along world x and y on the vial's plane (local Jacobian of the projection)
+    e = 0.01
+    J = np.array([[cam.project(c + [e, 0, 0])[0] - u0, cam.project(c + [0, e, 0])[0] - u0],
+                  [cam.project(c + [e, 0, 0])[1] - v0, cam.project(c + [0, e, 0])[1] - v0]]) / e
+    dx, dy = np.linalg.solve(J, np.array([du, dv]))
+    return float(dx), float(dy), int(green.sum())
+
+
+def script(task, ctx):
+    from yam_arena import ik
+
+    ctx.notes = []
+    L, R = ctx.left, ctx.right
+    L.offset = np.zeros(3)
+    R.offset = np.zeros(3)
+    T = task.TOP
+
+    def fk(arm):
+        rob = ctx.emb._env.unwrapped.scene[f"{arm.name}_robot"]
+        qa = np.asarray(getattr(rob.data.joint_pos, "torch", rob.data.joint_pos)[0].detach().cpu())[:6]
+        return ik.tcp_pose(qa, arm.base)
+
+    # --- 1. left arm: grip the rod, stand it on the stake, hold it plumb ----------------------------------------------
+    UG = 0.45                                  # grip height along the rod, above the shoe (well above the receiver)
+    lean = task.LEAN_REST - math.radians(1.0)  # pads a little steeper than plumb of the rod's ~13 deg lean
+    foot0 = np.array([task.SX, task.SY, T + task.Z_STAKE])
+    axis = np.array([math.sin(lean), 0.0, math.cos(lean)])
+    grab = foot0 + UG * axis
+    yield from L.set_grip(1.0, 0.3)
+    # from 4 cm out to the left (the wrist cannot stand further off at this height), fingers open across the rod
+    yield from L.move(grab + np.array([-0.04, 0.10, 0.08]), side_grip(lean), 2.0)
+    yield from goto(ctx, L, grab + np.array([0.0, 0.04, 0.0]), side_grip(lean), 1.5)
+    yield from L.move(grab + L.offset, side_grip(lean), 1.2)
+    yield from L.set_grip(0.0, 0.8)
+    yield from wait(0.3)
+    ctx.notes.append(f"left ik worst while reaching the rod {L.worst_mm:.1f} mm")
+    L.worst_mm = 0.0
+    n = 40
+    for k in range(1, n + 1):                  # swing it plumb about its shoe on the stake
+        th = lean * (1 - k / n)
+        p = foot0 + UG * np.array([math.sin(th), 0.0, math.cos(th)])
+        yield from L.move(p + L.offset, side_grip(th), 0.1)
+    hold = foot0 + np.array([0.0, 0.0, UG])
+    yield from goto(ctx, L, hold, side_grip(0.0), 0.5)
+
+    def plumb():
+        # the wrist also sags a little in angle: re-aim the gripper's orientation from the measured joints, so the
+        # pads (and the rod square in them) stand vertical
+        Rcmd = L.rot
+        for _ in range(3):
+            yield from wait(0.4)
+            _, RL = fk(L)
+            E = side_grip(0.0) @ RL.T
+            ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(E) - 1) / 2))))
+            if ang < 0.15:
+                break
+            Rcmd = E @ Rcmd
+            yield from L.move(L.pos, Rcmd, 0.5)
+
+    def level_by_bubble():
+        # read the round level on the top image and walk the rod's top toward the bubble (its high side) until the
+        # bubble sits in the circle: about 0.5 deg per move, the left hand pivoting the rod about its shoe
+        for i in range(10):
+            yield from wait(0.6)
+            dx, dy, n = read_bubble(task, np.asarray(ctx.obs.images["top_cam"]))
+            off = math.hypot(dx, dy)
+            ctx.notes.append(f"bubble read {i}: offset {dx * 1000:.1f}, {dy * 1000:.1f} mm ({n} px)")
+            if off < 0.0025:
+                break
+            w = np.array([dx, dy, 0.0]) / off
+            a = np.cross([0.0, 0.0, 1.0], w)
+            th = math.radians(0.5)
+            K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+            Rot = np.eye(3) + math.sin(th) * K + (1 - math.cos(th)) * K @ K
+            yield from L.move(L.pos + (UG + 0.0) * math.sin(th) * w, Rot @ L.rot, 0.5)
+
+    yield from plumb()
+    yield from wait(0.5)
+    pL, RL = fk(L)
+    off = math.degrees(math.acos(min(1.0, abs(float(RL[2, 1])))))   # the pads' long axis (gripper y) against vertical
+    ctx.notes.append(f"left pads {off:.2f} deg off vertical; fingertip {np.round((pL - hold) * 1000, 1).tolist()} mm")
+    ctx.notes.append(f"rod plumb: left fingertip {np.round((pL - hold) * 1000, 1).tolist()} mm from aim, "
+                     f"ik worst {L.worst_mm:.1f} mm")
+
+    # --- 2. where is the receiver? ---------------------------------------------------------------------------------
+    img = np.asarray(ctx.obs.images["top_cam"])
+    z_rcv, lit, npx = receiver_from_marks(task, img)
+    ctx.notes.append(f"top camera: '{lit}' mark lit, receiver centre z {(z_rcv - T) * 1000:.1f} mm ({npx} px)")
+
+    # --- 3. right arm: loosen the wing knob, slide to grade, tighten --------------------------------------------------
+    KX = task.SX + task.KNOB_X - 0.012         # fingertip point just behind the wing (rod faces are 12.5 mm off axis)
+    disp_c = lambda z: np.array([task.SX - task.RCV_D / 2, task.SY + task.RCV_Y, z])
+    turns = 12
+    STEP = 0.0005
+    look = lambda z: read_marks(task, np.asarray(ctx.obs.images["top_cam"]), disp_c(z))
+    z_guess, bias, result = z_rcv, 0.0, None
+    yield from R.set_grip(0.35, 0.3)           # about 33 mm open: room for the 12 mm hub, clear of the clamp body
+    for attempt in range(3):
+        kp = np.array([KX, task.SY, z_guess])
+        yield from goto(ctx, R, kp - np.array([0.09, 0.0, 0.0]), knob_grip(0.0), 2.0)
+        yield from wait(0.3)
+        ky, kz, kn = knob_from_wrist(task, ctx, R, np.asarray(ctx.obs.images["right_cam"]), fk)
+        ctx.notes.append(f"try {attempt}: wrist camera knob axis y {ky * 1000:.1f} mm, z {(kz - T) * 1000:.1f} mm "
+                         f"({kn} px)")
+        kp = np.array([KX, ky, kz])
+        yield from goto(ctx, R, kp - np.array([0.05, 0.0, 0.0]), knob_grip(0.0), 1.0)
+        yield from R.move(kp + R.offset, knob_grip(0.0), 1.0)
+        yield from R.set_grip(0.0, 0.8)
+        yield from wait(0.3)
+        LOOSE = math.pi / 2 - 0.1               # a quarter turn back (anticlockwise seen from the knob end), not
+        for k in range(1, turns + 1):          # quite to the stop: loose
+            yield from R.move(kp + R.offset, knob_grip(-LOOSE * k / turns), 0.12)
+        yield from wait(0.5)
+        roll = -LOOSE
+        z = kp[2]
+        first, _ = look(z)
+        last, moves, blind, z_on = first, 0, 0, None
+        while moves < 260:
+            state, cnt = look(z)
+            if moves % 20 == 0:
+                ctx.notes.append(f"try {attempt}: move {moves} at {(z - kp[2]) * 1000:.1f} mm reads {state} {cnt}")
+            if state == "on" and last == "high" and z_on is None:
+                z_on = z
+            if state == "on" and last == "high" and z_on - z > 0.012:
+                last = "low"                         # 12 mm on and still green: the receiver is not following the
+                ctx.notes.append(f"try {attempt}: green held 12 mm below where it lit; stopping here")  # hand
+            if state == "on" and last == "high":   # always finish from below: the receiver drops ~5 mm as the
+                z -= STEP                            # clamp takes its weight, so go on through the band to "low"
+                moves += 1
+                yield from R.move(np.array([kp[0], kp[1], z]) + R.offset, knob_grip(roll), 0.12)
+                yield from wait(0.08)
+                continue
+            if state == "on":
+                yield from wait(0.4)           # make sure: the hand lags its command a little
+                state, cnt = look(z)
+                if state == "on":
+                    break
+            if state is None:                  # nothing lit: out of the window (it drops when loosened) or hidden
+                blind += 1
+                if blind < 6:
+                    yield from wait(0.1)
+                    continue
+                state = last or "low"          # loosened receivers drop: a blind start means it is low
+            blind = 0
+            z += -STEP if state == "high" else STEP
+            last = state
+            moves += 1
+            yield from R.move(np.array([kp[0], kp[1], z]) + R.offset, knob_grip(roll), 0.12)
+            yield from wait(0.08)
+        # 0.5 mm on into the 6 mm green band from below, plus what the last try's result taught
+        z += 0.0005 + bias
+        yield from R.move(np.array([kp[0], kp[1], z]) + R.offset, knob_grip(roll), 0.5)
+        yield from wait(0.5)
+        state, cnt = look(z)
+        ctx.notes.append(f"try {attempt}: slid {(z - kp[2]) * 1000:.1f} mm from {first}; marks {state} {cnt}")
+        for k in range(1, turns + 1):          # a quarter turn on, pressed past the stop a little: tight
+            yield from R.move(np.array([kp[0], kp[1], z]) + R.offset,
+                              knob_grip(roll + (LOOSE + 0.25) * k / turns), 0.12)
+        yield from wait(0.4)
+        yield from R.set_grip(0.35, 0.6)
+        yield from R.move(R.pos - np.array([0.09, 0.0, 0.0]), R.rot, 1.0)
+        yield from wait(0.8)
+        result, cnt = look(z)
+        ctx.notes.append(f"try {attempt}: after letting go, marks {result} {cnt}")
+        if result == "on":
+            break
+        bias = max(-0.0005, bias + (-0.0015 if result == "high" else 0.0015))   # stays inside the band from below
+        z_guess = z
+    yield from R.move(R.pos - np.array([0.03, 0.03, -0.03]), R.rot, 1.0)
+    yield from plumb()                         # the right hand's work may have nudged the rod: square it again
+    yield from level_by_bubble()               # and check it by the bubble: the rod can turn in the pads
+    yield from wait(2.5)

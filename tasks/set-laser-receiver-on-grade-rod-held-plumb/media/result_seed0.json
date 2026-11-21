@@ -1,0 +1,50 @@
+{
+  "seed": 0,
+  "task_score": 1.0,
+  "success": true,
+  "steps": 1037,
+  "error": null,
+  "worst_ik_mm": {
+    "left": 0.07,
+    "right": 21.71
+  },
+  "script_notes": [
+    "left ik worst while reaching the rod 3.5 mm",
+    "left pads 0.80 deg off vertical; fingertip [2.6, 1.2, -4.9] mm",
+    "rod plumb: left fingertip [2.6, 1.2, -4.9] mm from aim, ik worst 0.1 mm",
+    "top camera: 'low' mark lit, receiver centre z 261.0 mm (53 px)",
+    "try 0: wrist camera knob axis y -2.0 mm, z 263.3 mm (2332 px)",
+    "try 0: move 0 at 0.0 mm reads low {'high': 0, 'on': 0, 'low': 47}",
+    "try 0: move 20 at 10.0 mm reads low {'high': 0, 'on': 0, 'low': 53}",
+    "try 0: move 40 at 20.0 mm reads low {'high': 0, 'on': 0, 'low': 50}",
+    "try 0: move 60 at 30.0 mm reads low {'high': 0, 'on': 0, 'low': 64}",
+    "try 0: move 80 at 40.0 mm reads low {'high': 0, 'on': 23, 'low': 24}",
+    "try 0: slid 41.0 mm from low; marks on {'high': 0, 'on': 70, 'low': 3}",
+    "try 0: after letting go, marks on {'high': 0, 'on': 74, 'low': 0}"
+  ],
+  "scorer": {
+    "start": [
+      -0.0175,
+      -0.0032
+    ],
+    "gate": null,
+    "score": 1.0,
+    "receiver_u_mm": 216.3,
+    "grade_u_mm": 215.0,
+    "display": "on",
+    "knob_deg": 90.0,
+    "jaw_mm": 3.11,
+    "hands_near": [
+      false,
+      false
+    ],
+    "still": true,
+    "tilt_deg": 0.66,
+    "foot_on_stake": "True",
+    "foot_mm": [
+      -6.9,
+      2.0,
+      65.3
+    ]
+  }
+}
