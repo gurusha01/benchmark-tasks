@@ -1,0 +1,241 @@
+# Scripted demo: take a throat swab from the training head, tongue held down with the tongue blade.
+#
+# Inputs, all observable: the first top-camera image (where the blade and the swab lie along their rests), the arms'
+# own joint angles (forward kinematics: where each fingertip really is) and the head's fixed layout from the setup
+# text (lip plane, mouth opening, teeth, pillars). It never reads the simulator's object poses or the tongue's joint.
+#
+# 1. Find the blade's handle end and the swab's cap end on the top-camera image.
+# 2. Left arm: grip the blade's handle end from behind (fingers on its two edges), carry it to the mouth, slide it in
+#    over the raised tongue along a line from the left corner of the mouth, then press the tongue flat. The arm sags under the
+#    load, so the press is closed on the blade tip's height worked out from the measured joints.
+# 3. Right arm: grip the swab by its cap from its right-hand side, slide it in along the right side of the mouth above the blade, pivoting on
+#    the lips: rub the right pillar, sweep under the uvula, rub the left pillar, come back to the middle and out.
+# 4. Left arm: lift the blade off the tongue and draw it out.
+import math
+import numpy as np
+
+
+def grip_rot(d):
+    """Gripper frame with its approach axis along d and the fingers closing vertically."""
+    a = np.asarray(d, float) / np.linalg.norm(d)
+    x = np.array([0.0, 0.0, 1.0]) - a * a[2]
+    x /= np.linalg.norm(x)
+    return np.column_stack([x, np.cross(a, x), a])
+
+
+def blade_rot(d):
+    """Gripper pointing along the blade (direction d) from behind its handle end, the fingers closing horizontally
+    on its two edges. Pinched by its edges the blade gets the full grip force; a 1.8 mm blade pinched flat gets
+    almost none. (Of the two wrist rolls for this grip, the arm reaches this one.)"""
+    a = np.asarray(d, float) / np.linalg.norm(d)
+    x = -np.cross([0.0, 0.0, 1.0], a)
+    x /= np.linalg.norm(x)
+    return np.column_stack([x, np.cross(a, x), a])
+
+
+def swab_rot(d):
+    """Gripper level, reaching across the swab's cap from its right-hand side, fingers closing vertically, the swab
+    running along the gripper's y axis in direction d (the hand stays to the right of the swab)."""
+    d = np.asarray(d, float) / np.linalg.norm(d)
+    a = np.cross([0.0, 0.0, 1.0], d)
+    a /= np.linalg.norm(a)
+    x = np.array([0.0, 0.0, 1.0])
+    return np.column_stack([x, np.cross(a, x), a])
+
+
+def locate_tools(task, img):
+    """World x of the blade's handle end and of the swab cap's end, from one top-camera RGB image."""
+    from yam_arena import station
+    from yam_arena.urdf import quat_xyzw_to_matrix
+
+    cam = station.top_camera("calibrated")
+    ln = cam.lens
+    H, W = img.shape[:2]
+    sx, sy = W / ln.width, H / ln.height
+    R = quat_xyzw_to_matrix(np.array(cam.rot_xyzw))
+    p0 = np.array(cam.pos)
+    vv, uu = np.mgrid[0:H, 0:W]
+    u, v = (uu + 0.5) / sx, (vv + 0.5) / sy
+    d = np.stack([(u - ln.cx) / ln.fx, -(v - ln.cy) / ln.fy, -np.ones_like(u)], -1) @ R.T
+
+    def cast(z):
+        t = (z - p0[2]) / d[..., 2]
+        return p0 + t[..., None] * d
+
+    g = img.astype(float)
+    T = task.TOP
+    P = cast(T + task.RACK_Z + task.BLADE_T)
+    wood = g.min(-1) > 165                      # the pale blade on the dark rest (the bench is masked out by y and x)
+    mb = wood & (np.abs(P[..., 1] - task.BLADE_Y) < 0.011) & (P[..., 0] > 0.23) & (P[..., 0] < 0.42)
+    Q = cast(T + task.RACK_Z + 0.00125 + 0.006)
+    blue = (g[..., 2] > 90) & (g[..., 2] - g[..., 0] > 40)
+    ms = blue & (np.abs(Q[..., 1] - task.SWAB_Y) < 0.010) & (Q[..., 0] > 0.23) & (Q[..., 0] < 0.36)
+    if mb.sum() < 15 or ms.sum() < 6:
+        raise RuntimeError(f"tools not found on the top image (blade {mb.sum()} px, cap {ms.sum()} px)")
+    # the blade's handle end; the middle of the cap (its end face, seen from behind, smears its near end back)
+    return float(np.percentile(P[mb][:, 0], 1.0)), float(np.median(Q[ms][:, 0])), int(mb.sum()), int(ms.sum())
+
+
+def script(task, ctx):
+    from yam_arena import ik
+
+    ctx.notes = []
+    L, R = ctx.left, ctx.right
+    L.offset = np.zeros(3)
+    R.offset = np.zeros(3)
+    T = task.TOP
+
+    def fk(arm):
+        rob = ctx.emb._env.unwrapped.scene[f"{arm.name}_robot"]
+        qa = np.asarray(getattr(rob.data.joint_pos, "torch", rob.data.joint_pos)[0].detach().cpu())[:6]
+        return ik.tcp_pose(qa, arm.base)
+
+    def W(h):                       # head frame -> world
+        return np.array([task.XF + h[0], h[1], task.ZM + h[2]])
+
+    # --- 1. where are the tools? -----------------------------------------------------------------------------------
+    xb, xs, nb, ns = locate_tools(task, np.asarray(ctx.obs.images["top_cam"]))
+    ctx.notes.append(f"camera: blade end x {xb*1000:.1f} mm ({nb} px), cap middle x {xs*1000:.1f} mm ({ns} px)")
+    zb = T + task.RACK_Z + task.BLADE_T / 2 + 0.0005
+    zs = T + task.RACK_Z + 0.00125 + 0.0005
+    GB = 0.040                       # TCP 40 mm in from the blade's handle end, a third of the way along it
+    SB = task.BLADE_L - GB           # TCP (on the tool's axis) to the blade's inner end
+    SS = 0.170 - 0.0125              # TCP (the cap's middle) to the end of the swab's tip
+    X = np.array([1.0, 0.0, 0.0])
+
+    def swab_part():
+        """Right arm: grip the swab by its cap, rub the right pillar, sweep under the uvula, rub the left one, out."""
+        yield from R.set_grip(0.6, 0.4)
+        gs = np.array([xs, task.SWAB_Y, zs])
+        Es = swab_rot(X)
+        yield from goto(ctx, R, gs + np.array([0.0, -0.04, 0.0]), Es, 2.5)
+        yield from R.move(gs + R.offset, Es, 1.5)
+        yield from wait(0.4)
+        ctx.notes.append(f"swab grasp: TCP target {np.round(gs*1000,1).tolist()} measured {np.round(fk(R)[0]*1000,1).tolist()} mm")
+        # close gently on the 12 mm cap (aim for a 6.6 mm gap): a hard, fast pinch squirts the light swab out or
+        # tilts it in the fingers
+        yield from R.set_grip(0.07, 1.5)
+        yield from wait(0.3)
+        yield from R.move(gs + R.offset + np.array([0, 0, 0.05]), Es, 1.0)
+
+        # the swab runs 3 mm above the mouth centre: about 10 mm below the upper teeth and the soft palate, about 11 mm
+        # above the blade lying on the tongue, so a few mm of tilt in the fingers costs nothing
+        ZS = 0.003
+        PIV = np.array([0.0, -0.008, ZS])             # the swab pivots on this point between the lips
+
+        def swab_pose(tip_end):
+            # outside the mouth the swab points straight in; inside it pivots on the point between the lips
+            d = tip_end - PIV if tip_end[0] > 0.03 else X.copy()
+            d = d / np.linalg.norm(d)
+            return W(tip_end) - SS * d, swab_rot(d)
+
+        start = np.array([-0.04, -0.008, ZS])
+        p, r = swab_pose(start)
+        yield from goto(ctx, R, p, r, 3.0)
+        # re-aim on the swab tip from the measured joints (the wrist droop tips a 16 cm swab several mm)
+        cmd = p + R.offset
+        for _ in range(4):
+            yield from wait(0.35)
+            pa, Ra = fk(R)
+            err = (pa + Ra[:, 1] * SS) - W(start)
+            if np.linalg.norm(err) < 0.0012:
+                break
+            cmd = cmd - err
+            yield from R.move(cmd, r, 0.4)
+        R.offset = cmd - p
+        ctx.notes.append(f"swab tip aimed, error {np.round(err*1000,1).tolist()} mm")
+        cur = [start]
+
+        def path(points, secs_per_cm=0.6):
+            for nxt in points:
+                nxt = np.asarray(nxt, float)
+                c = cur[0]
+                steps = max(2, int(np.linalg.norm(nxt - c) * 100 / 0.5 * 2))
+                for k in range(1, steps + 1):
+                    pp, rr = swab_pose(c + (nxt - c) * k / steps)
+                    yield from R.move(pp + R.offset, rr, secs_per_cm * np.linalg.norm(nxt - c) * 100 / steps)
+                cur[0] = nxt
+
+        yield from path([[0.060, -0.008, ZS]])
+        yield from path([[0.090, -0.0156, ZS]])         # right pillar: tip side 2 mm into its face
+        yield from wait(0.6)
+        # back off and cross in front of the uvula (it hangs 80-88 mm in) to the left pillar
+        yield from path([[0.065, -0.004, ZS], [0.065, 0.006, ZS], [0.090, 0.0148, ZS]])
+        yield from wait(0.6)
+        yield from path([[0.065, 0.002, ZS], [0.040, -0.008, ZS], [-0.05, -0.008, ZS]])
+        p, r = swab_pose(cur[0])
+        yield from R.move(p + R.offset + np.array([-0.04, -0.03, 0.06]), r, 1.2)
+
+    # --- 2. left arm: blade ------------------------------------------------------------------------------------------
+    yield from L.set_grip(0.5, 0.4)
+    gb = np.array([xb + GB, task.BLADE_Y, zb])
+    Eb = blade_rot(X)
+    yield from goto(ctx, L, gb + np.array([-GB - 0.05, 0.0, 0.0]), Eb, 2.5)   # pad tips 4 cm short of the blade
+    yield from L.move(gb + L.offset, Eb, 2.0)
+    yield from L.set_grip(0.0, 0.8)
+    yield from L.move(gb + L.offset + np.array([0, 0, 0.05]), Eb, 1.0)
+
+    # insertion line: through the lips at y +11 mm, 30 deg across the mouth; the tip ends 40 mm in, near the middle
+    db = np.array([math.cos(math.radians(-30)), math.sin(math.radians(-30)), 0.0])
+    Rb = blade_rot(db)
+    lip_b = np.array([0.0, 0.011, 0.0])
+    t_in = 0.040 / db[0]
+    Z_SLIDE = 0.0110                 # blade centre while sliding in over the raised tongue (top at +2 mm)
+    Z_PRESS = -0.0129                # blade centre with the tongue held flat (its stop: top at -14 mm); pressing
+                                     # harder than the stop pivots the blade nose-up on the tongue's front edge
+
+    def blade_tcp(t, z):
+        tip = lip_b + t * db
+        return W(np.array([tip[0], tip[1], z])) - SB * db
+
+    def blade_tip_now():
+        p, Rm = fk(L)
+        return p + Rm[:, 2] * SB
+
+    def tip_target(t, z):
+        tip = lip_b + t * db
+        return W(np.array([tip[0], tip[1], z]))
+
+    def aim_tip(t, z, rounds=4):
+        """Re-aim on the blade tip worked out from the measured joints: the wrist droops a degree or two, which
+        drops a 14 cm blade's tip several mm even when the TCP is where it was sent."""
+        goal = tip_target(t, z)
+        cmd = blade_tcp(t, z) + L.offset
+        for _ in range(rounds):
+            yield from wait(0.35)
+            err = blade_tip_now() - goal
+            if np.linalg.norm(err) < 0.0012:
+                break
+            cmd = cmd - err
+            yield from L.move(cmd, Rb, 0.4)
+        L.offset = cmd - blade_tcp(t, z)
+
+    yield from goto(ctx, L, blade_tcp(-0.05, Z_SLIDE), Rb, 3.0)
+    yield from aim_tip(-0.05, Z_SLIDE)
+    n = 30
+    for k in range(1, n + 1):
+        yield from L.move(blade_tcp(-0.05 + (t_in + 0.05) * k / n, Z_SLIDE) + L.offset, Rb, 0.08)
+    yield from wait(0.3)
+    ctx.notes.append(f"blade tip after sliding in {((blade_tip_now() - W(np.zeros(3))) * 1000).round(1).tolist()} mm")
+    # press: lower the command until the tip (from the measured joints) sits at the pressing height
+    cmd = blade_tcp(t_in, Z_SLIDE) + L.offset
+    for k in range(40):
+        tip = blade_tip_now()
+        err = (task.ZM + Z_PRESS) - tip[2]
+        if abs(err) < 0.0006 and k > 6:
+            break
+        cmd = cmd + np.array([0.0, 0.0, max(-0.002, min(0.002, 0.8 * err))])
+        yield from L.move(cmd, Rb, 0.15)
+    tip = blade_tip_now()
+    ctx.notes.append(f"blade tip at {((tip - W(np.zeros(3))) * 1000).round(1).tolist()} mm (head frame, measured)")
+    hold_b = cmd.copy()
+
+    # --- 3. right arm: swab (the tongue stays held down) -------------------------------------------------------------
+    yield from swab_part()
+
+    # --- 4. left arm: blade out ---------------------------------------------------------------------------------------
+    yield from L.move(hold_b + np.array([0, 0, 0.012]), Rb, 0.8)
+    for k in range(1, 21):
+        yield from L.move(blade_tcp(t_in - (t_in + 0.06) * k / 20, Z_SLIDE + 0.002) + L.offset, Rb, 0.08)
+    yield from L.move(L.pos + np.array([-0.05, 0.05, 0.06]), Rb, 1.2)
+    yield from wait(2.0)

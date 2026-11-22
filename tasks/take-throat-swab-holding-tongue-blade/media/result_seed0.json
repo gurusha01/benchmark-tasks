@@ -1,0 +1,36 @@
+{
+  "seed": 0,
+  "task_score": 1.0,
+  "success": true,
+  "steps": 1191,
+  "error": null,
+  "worst_ik_mm": {
+    "left": 0.08,
+    "right": 20.09
+  },
+  "script_notes": [
+    "camera: blade end x 267.8 mm (386 px), cap middle x 270.2 mm (61 px)",
+    "blade tip after sliding in [40.2, -11.7, 10.4] mm",
+    "blade tip at [40.3, -12.1, -12.7] mm (head frame, measured)",
+    "swab grasp: TCP target [270.2, -90.0, 889.2] measured [268.8, -90.1, 889.5] mm",
+    "swab tip aimed, error [0.2, -0.0, -1.0] mm"
+  ],
+  "scorer": {
+    "start_offset_m": [
+      0.0066,
+      0.0094
+    ],
+    "gate": null,
+    "left_pillar": true,
+    "right_pillar": true,
+    "tip_clearance_mm": {
+      "forbid": 71.94,
+      "left": 169.98,
+      "right": 161.15,
+      "back": 185.85
+    },
+    "max_tongue_press_mm": 16.0,
+    "head_shift_mm": 0.0,
+    "score": 1.0
+  }
+}
