@@ -1,0 +1,75 @@
+{
+  "seed": 0,
+  "task_score": 1.0,
+  "success": true,
+  "steps": 1104,
+  "error": null,
+  "worst_ik_mm": {
+    "left": 0.09,
+    "right": 0.07
+  },
+  "script_notes": [
+    "camera: pen centre y -160.9 mm (span 136.3 mm, 286 px); callus on mth5 (33 px, fit 0.10 px), foot shift -11.0 mm",
+    "grasp: TCP target [280.0, -160.9, 793.0] measured [284.9, -158.3, 892.9] mm",
+    "mth1: roll 75 deg, ik cost 10.09, offset [-0.8, 0.1, 2.3] mm",
+    "hallux: roll 75 deg, ik cost 10.09, offset [-0.8, 0.1, 2.3] mm",
+    "mth3: roll 45 deg, ik cost 6.10, offset [-0.8, 0.1, 2.3] mm",
+    "mth5: roll 45 deg, ik cost 6.10, offset [-0.8, 0.1, 2.3] mm"
+  ],
+  "scorer": {
+    "start": {
+      "callus": "mth5",
+      "foot_dy_mm": -10.5,
+      "pen_dy_mm": -1.3
+    },
+    "gate": null,
+    "callus_site": "mth5",
+    "sites": {
+      "mth1": {
+        "passed": true,
+        "land_mm": 1.0,
+        "min_barrel_to_skin_mm": 31.3,
+        "max_angle_deg": 1.2,
+        "slide_mm": 0.81,
+        "duration_s": 1.75,
+        "max_hinge_deg": 49.7,
+        "failed": []
+      },
+      "hallux": {
+        "passed": true,
+        "land_mm": 2.1,
+        "min_barrel_to_skin_mm": 31.5,
+        "max_angle_deg": 1.1,
+        "slide_mm": 0.77,
+        "duration_s": 1.7,
+        "max_hinge_deg": 49.3,
+        "failed": []
+      },
+      "mth3": {
+        "passed": true,
+        "land_mm": 2.7,
+        "min_barrel_to_skin_mm": 30.8,
+        "max_angle_deg": 1.1,
+        "slide_mm": 1.64,
+        "duration_s": 1.7,
+        "max_hinge_deg": 49.7,
+        "failed": []
+      },
+      "mth5": {
+        "passed": true,
+        "land_mm": 13.9,
+        "min_barrel_to_skin_mm": 30.8,
+        "max_angle_deg": 1.2,
+        "slide_mm": 1.73,
+        "duration_s": 1.75,
+        "max_hinge_deg": 53.4,
+        "failed": []
+      }
+    },
+    "open_contact": null,
+    "pen_in_cradle": true,
+    "hands_clear": true,
+    "foot_shift_mm": 0.0,
+    "score": 1.0
+  }
+}

@@ -1,0 +1,198 @@
+# Naive baseline: the demo's script with one change: every site is pressed with the pen along +x (straight
+# forward), not along the site's own normal. Same grasp, depth, dwell and pen return.
+import math
+import numpy as np
+
+D_START, D_SLOW, D_PRESS = 0.090, 0.045, 0.031
+CALLUS_STEP = 0.014
+FIL_SET = 0.0029
+
+
+def pen_frame(d, z_hint):
+    """TCP rotation with the pen (lying across the jaws) along the TCP's y axis = d, the TCP's z axis (approach) as
+    close to z_hint as possible."""
+    y = np.asarray(d, float) / np.linalg.norm(d)
+    z = np.asarray(z_hint, float) - y * np.dot(z_hint, y)
+    z /= np.linalg.norm(z)
+    return np.column_stack([np.cross(y, z), y, z])
+
+
+def _cam():
+    from yam_arena import station
+    from yam_arena.urdf import quat_xyzw_to_matrix
+
+    cam = station.top_camera("calibrated")
+    return cam, quat_xyzw_to_matrix(np.array(cam.rot_xyzw)), np.array(cam.pos)
+
+
+def rays(img):
+    cam, R, p0 = _cam()
+    ln = cam.lens
+    H, W = img.shape[:2]
+    sx, sy = W / ln.width, H / ln.height
+    vv, uu = np.mgrid[0:H, 0:W]
+    u, v = (uu + 0.5) / sx, (vv + 0.5) / sy
+    d = np.stack([(u - ln.cx) / ln.fx, -(v - ln.cy) / ln.fy, -np.ones_like(u)], -1) @ R.T
+    return p0, d
+
+
+def project(P, shape):
+    cam, R, p0 = _cam()
+    ln = cam.lens
+    H, W = shape[:2]
+    pc = R.T @ (np.asarray(P, float) - p0)
+    u = ln.cx + ln.fx * pc[0] / (-pc[2])
+    v = ln.cy - ln.fy * pc[1] / (-pc[2])
+    return np.array([u * W / ln.width - 0.5, v * H / ln.height - 0.5])
+
+
+def locate_pen(task, img):
+    """World y of the pen's centre: the blue barrel's extent along the cradle, cast onto the barrel's top."""
+    p0, d = rays(img)
+    z = task.PEN_Z + task.BARREL_R
+    t = (z - p0[2]) / d[..., 2]
+    P = p0 + t[..., None] * d
+    g = img.astype(float)
+    blue = (g[..., 2] > 50) & (g[..., 2] > 1.6 * g[..., 0]) & (g[..., 2] > 1.25 * g[..., 1])
+    m = blue & (np.abs(P[..., 0] - task.CRADLE_X) < 0.012) & (np.abs(P[..., 1] - task.CRADLE_Y) < 0.10)
+    if m.sum() < 20:
+        raise RuntimeError(f"pen not found ({m.sum()} px)")
+    ys = P[m][:, 1]
+    lo, hi = np.percentile(ys, 1.0), np.percentile(ys, 99.0)
+    return float((lo + hi) / 2), float(hi - lo), int(m.sum())
+
+
+def locate_callus(task, img):
+    """(site, foot shift along y): the yellow callus's centroid matched to each site's projection."""
+    g = img.astype(float)
+    yel = (g[..., 0] > 150) & (g[..., 1] > 120) & (g[..., 0] - g[..., 2] > 90) & (g[..., 1] - g[..., 2] > 60)
+    if yel.sum() < 4:
+        raise RuntimeError(f"callus not found ({yel.sum()} px)")
+    vv, uu = np.nonzero(yel)
+    c = np.array([uu.mean(), vv.mean()])
+    best = None
+    for nm in task.SITE_NAMES:
+        p, R = task._site_world_frame(nm)
+        for dy in np.arange(-0.016, 0.0161, 0.0005):
+            P = np.array(task.FOOT_POS) + np.array([0.0, dy, 0.0]) + p + R[:, 2] * task.CALLUS_H
+            e = float(np.linalg.norm(project(P, img.shape) - c))
+            if best is None or e < best[0]:
+                best = (e, nm, float(dy))
+    return best[1], best[2], best[0], int(yel.sum())
+
+
+def jmove(arm, pos, rot, duration, seed=None):
+    """Joint-space move to the IK solution (from ``seed``, default READY) of pos/rot: used for large re-orientations,
+    where tracking a Cartesian path step by step would jump between IK branches."""
+    from yam_arena import ik
+    from yam_arena.constants import READY
+
+    q1, pe, _ = ik.solve(np.asarray(pos, float), ik.matrix_to_quat_xyzw(rot),
+                         np.array(READY if seed is None else seed, float), base_pos=arm.base, iters=300)
+    q0 = arm.q.copy()
+    n = max(1, round(duration * CONTROL_HZ))
+    for k in range(1, n + 1):
+        s = ik.smoothstep(k / n)
+        arm.q = q0 + s * (q1 - q0)
+        arm.pos, arm.rot = ik.tcp_pose(arm.q, arm.base)
+        arm.cmd = np.r_[arm.q, arm.grip]
+        yield
+    arm.pos, arm.rot = np.asarray(pos, float), rot
+    arm.worst_mm = max(arm.worst_mm, pe * 1000)
+
+
+def choose_frame(task, A, target, n):
+    """TCP rotation for pressing along -n: the pen along the TCP's y axis, the roll about it chosen so the arm
+    reaches the pose exactly (IK from READY) and keeps its wrist and gripper well in front of the sole."""
+    from yam_arena import ik
+    from yam_arena.constants import READY
+
+    d = -n
+    DOWN = np.array([0.0, 0.0, -1.0])
+    h = DOWN - d * np.dot(DOWN, d)
+    h /= np.linalg.norm(h)
+    best = None
+    for roll in range(-150, 181, 15):
+        zr = math.cos(math.radians(roll)) * h + math.sin(math.radians(roll)) * np.cross(d, h)
+        Rs = pen_frame(d, zr)
+        q, pe, re = ik.solve(target + n * (task.NOSE_X + D_PRESS), ik.matrix_to_quat_xyzw(Rs), np.array(READY, float),
+                             base_pos=A.base, iters=200)
+        q2, pe2, re2 = ik.solve(target + n * (task.NOSE_X + 0.14), ik.matrix_to_quat_xyzw(Rs), q, base_pos=A.base,
+                                iters=200)
+        cost = pe + pe2 + 0.05 * (re + re2) + 0.002 * abs(roll) / 15
+        if best is None or cost < best[0]:
+            best = (cost, roll, Rs)
+    return best
+
+
+def script(task, ctx):
+    from yam_arena import ik
+
+    ctx.notes = []
+    A, Lf = ctx.right, ctx.left
+    A.offset = np.zeros(3)
+    Lf.offset = np.zeros(3)
+    off = getattr(ctx, "offline", None)
+
+    def fk(arm):
+        if off is not None:
+            return ik.tcp_pose(arm.q, arm.base)
+        rob = ctx.emb._env.unwrapped.scene[f"{arm.name}_robot"]
+        qa = np.asarray(getattr(rob.data.joint_pos, "torch", rob.data.joint_pos)[0].detach().cpu())[:6]
+        return ik.tcp_pose(qa, arm.base)
+
+    DOWN = np.array([0.0, 0.0, -1.0])
+    # --- left arm out of the way while the scene settles; then read the top image -------------------------------------
+    yield from both(Lf.move(np.array([0.18, 0.36, 1.00]), Lf.rot, 1.5), A.set_grip(1.0, 0.5))
+    if off is None:
+        img = np.asarray(ctx.obs.images["top_cam"])
+        yp, span, npx = locate_pen(task, img)
+        site_c, dy, err, nyel = locate_callus(task, img)
+        ctx.notes.append(f"camera: pen centre y {yp*1000:.1f} mm (span {span*1000:.1f} mm, {npx} px); callus on "
+                         f"{site_c} ({nyel} px, fit {err:.2f} px), foot shift {dy*1000:.1f} mm")
+    else:
+        yp, site_c, dy = off
+
+    # --- right arm grips the pen across its middle -------------------------------------------------------------------
+    G = np.array([task.CRADLE_X, yp, task.PEN_Z])
+    Rg = pen_frame([0.0, 1.0, 0.0], DOWN)
+    yield from jmove(A, G + np.array([0.0, 0.0, 0.07]), Rg, 2.5)
+    yield from goto(ctx, A, G + np.array([0.0, 0.0, 0.07]), Rg, 0.5)
+    yield from A.move(G + A.offset, Rg, 1.5)
+    yield from wait(0.3)
+    yield from A.set_grip(0.03, 1.0)
+    yield from wait(0.3)
+    yield from A.move(G + A.offset + np.array([0.0, 0.0, 0.10]), Rg, 1.2)
+    ctx.notes.append(f"grasp: TCP target {np.round(G*1000,1).tolist()} measured {np.round(fk(A)[0]*1000,1).tolist()} mm")
+
+    # --- the four sites ------------------------------------------------------------------------------------------------
+    foot0 = np.array(task.FOOT_POS) + np.array([0.0, dy, 0.0])
+    for nm in ("mth1", "hallux", "mth3", "mth5"):
+        p, R = task._site_world_frame(nm)
+        n = np.array([-1.0, 0.0, 0.0])   # NAIVE: every site poked straight along the bench's x axis
+        target = foot0 + p
+        if nm == site_c:   # test beside the callus: away from the toes (on the big toe, toward its tip)
+            target = target + (1.0 if nm == "hallux" else -1.0) * CALLUS_STEP * R[:, 0]
+        cost, roll, Rs = choose_frame(task, A, target, n)
+
+        def at(D):
+            return target + n * (task.NOSE_X + D) - FIL_SET * Rs[:, 0]
+
+        yield from jmove(A, at(0.14) + A.offset, Rs, 2.5)
+        yield from goto(ctx, A, at(D_START), Rs, 1.0)
+        yield from A.move(at(D_SLOW) + A.offset, Rs, 1.2)
+        yield from A.move(at(D_PRESS) + A.offset, Rs, 0.9)
+        yield from wait(1.0)
+        yield from A.move(at(D_START) + A.offset, Rs, 1.4)
+        yield from A.move(at(0.14) + A.offset, Rs, 0.8)
+        ctx.notes.append(f"{nm}: roll {roll} deg, ik cost {cost*1000:.2f}, offset {np.round(A.offset*1000,1).tolist()} mm")
+
+    # --- pen back in its cradle ---------------------------------------------------------------------------------------
+    C = np.array([task.CRADLE_X, task.CRADLE_Y, task.PEN_Z + 0.002])
+    yield from jmove(A, C + np.array([0.0, 0.0, 0.10]) + A.offset, Rg, 2.5)
+    yield from goto(ctx, A, C + np.array([0.0, 0.0, 0.08]), Rg, 1.0)
+    yield from A.move(C + A.offset, Rg, 1.5)
+    yield from wait(0.3)
+    yield from A.set_grip(1.0, 0.8)
+    yield from A.move(C + A.offset + np.array([0.0, 0.0, 0.12]), Rg, 1.2)
+    yield from wait(2.0)
