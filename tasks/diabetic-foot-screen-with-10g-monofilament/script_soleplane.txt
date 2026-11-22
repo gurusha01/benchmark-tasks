@@ -1,11 +1,11 @@
 # Wrong-angle baseline: the demo's script with one change: every site is pressed along the normal of the sole's
-# mean plane (correct only at the 3rd metatarsal head), not along each site's own normal.
+# mean plane (correct only near the 3rd metatarsal head), not along the skin's own normal there.
 import math
 import numpy as np
 
 D_START, D_SLOW, D_PRESS = 0.090, 0.045, 0.031
 CALLUS_STEP = 0.014
-FIL_SET = 0.0029
+FIL_SET = 0.0029     # setup text: the filament's tip sits 2.9 mm off the barrel's axis, toward the white stripe
 
 
 def pen_frame(d, z_hint):
@@ -46,6 +46,17 @@ def project(P, shape):
     return np.array([u * W / ln.width - 0.5, v * H / ln.height - 0.5])
 
 
+def project_many(P, shape):
+    """project() for an (N, 3) array of points."""
+    cam, R, p0 = _cam()
+    ln = cam.lens
+    H, W = shape[:2]
+    pc = (np.asarray(P, float) - p0) @ R
+    u = ln.cx + ln.fx * pc[:, 0] / (-pc[:, 2])
+    v = ln.cy - ln.fy * pc[:, 1] / (-pc[:, 2])
+    return np.stack([u * W / ln.width - 0.5, v * H / ln.height - 0.5], -1)
+
+
 def locate_pen(task, img):
     """World y of the pen's centre: the blue barrel's extent along the cradle, cast onto the barrel's top."""
     p0, d = rays(img)
@@ -63,7 +74,7 @@ def locate_pen(task, img):
 
 
 def locate_callus(task, img):
-    """(site, foot shift along y): the yellow callus's centroid matched to each site's projection."""
+    """(site, foot shift along y): the yellow callus's centroid matched to each site's projected callus patch."""
     g = img.astype(float)
     yel = (g[..., 0] > 150) & (g[..., 1] > 120) & (g[..., 0] - g[..., 2] > 90) & (g[..., 1] - g[..., 2] > 60)
     if yel.sum() < 4:
@@ -71,11 +82,12 @@ def locate_callus(task, img):
     vv, uu = np.nonzero(yel)
     c = np.array([uu.mean(), vv.mean()])
     best = None
-    for nm in task.SITE_NAMES:
-        p, R = task._site_world_frame(nm)
+    for i, nm in enumerate(task.SITE_NAMES):
+        # the patch's projected centroid (it follows the curved skin, so its image centre is not the site's image)
+        V = task.FOOT_MESHES[1 + i][1]
         for dy in np.arange(-0.016, 0.0161, 0.0005):
-            P = np.array(task.FOOT_POS) + np.array([0.0, dy, 0.0]) + p + R[:, 2] * task.CALLUS_H
-            e = float(np.linalg.norm(project(P, img.shape) - c))
+            P = np.array(task.FOOT_POS) + np.array([0.0, dy, 0.0]) + V
+            e = float(np.linalg.norm(project_many(P, img.shape).mean(0) - c))
             if best is None or e < best[0]:
                 best = (e, nm, float(dy))
     return best[1], best[2], best[0], int(yel.sum())
@@ -169,13 +181,14 @@ def script(task, ctx):
     foot0 = np.array(task.FOOT_POS) + np.array([0.0, dy, 0.0])
     for nm in ("mth1", "hallux", "mth3", "mth5"):
         p, R = task._site_world_frame(nm)
+        target, n = foot0 + p, R[:, 2]
+        if nm == site_c:   # test beside the callus: the skin point 14 mm from its centre toward the heel
+            q, n = task.skin_point(p - CALLUS_STEP * R[:, 0])
+            target = foot0 + q
         n = task.RF[:, 2]                # WRONG ANGLE: every site pressed along the sole plane's normal
-        target = foot0 + p
-        if nm == site_c:   # test beside the callus: away from the toes (on the big toe, toward its tip)
-            target = target + (1.0 if nm == "hallux" else -1.0) * CALLUS_STEP * R[:, 0]
         cost, roll, Rs = choose_frame(task, A, target, n)
 
-        def at(D):
+        def at(D):   # the stripe faces the robots in the cradle, i.e. along the TCP's x axis once gripped
             return target + n * (task.NOSE_X + D) - FIL_SET * Rs[:, 0]
 
         yield from jmove(A, at(0.14) + A.offset, Rs, 2.5)

@@ -9,12 +9,12 @@
     "right": 0.07
   },
   "script_notes": [
-    "camera: pen centre y -160.9 mm (span 136.3 mm, 286 px); callus on mth5 (33 px, fit 0.10 px), foot shift -11.0 mm",
+    "camera: pen centre y -160.9 mm (span 136.3 mm, 286 px); callus on mth5 (31 px, fit 0.11 px), foot shift -11.0 mm",
     "grasp: TCP target [280.0, -160.9, 793.0] measured [284.9, -158.3, 892.9] mm",
-    "mth1: roll 75 deg, ik cost 10.09, offset [-0.8, 0.1, 2.3] mm",
-    "hallux: roll 75 deg, ik cost 10.09, offset [-0.8, 0.1, 2.3] mm",
-    "mth3: roll 45 deg, ik cost 6.10, offset [-0.8, 0.1, 2.3] mm",
-    "mth5: roll 45 deg, ik cost 6.10, offset [-0.8, 0.1, 2.3] mm"
+    "mth1: roll 90 deg, ik cost 12.05, offset [-0.7, -0.0, 1.9] mm",
+    "hallux: roll 75 deg, ik cost 10.08, offset [-0.7, -0.0, 1.9] mm",
+    "mth3: roll 45 deg, ik cost 6.10, offset [-0.7, -0.0, 1.9] mm",
+    "mth5: roll 45 deg, ik cost 6.10, offset [-0.7, -0.0, 1.9] mm"
   ],
   "scorer": {
     "start": {
@@ -27,42 +27,42 @@
     "sites": {
       "mth1": {
         "passed": true,
-        "land_mm": 1.0,
-        "min_barrel_to_skin_mm": 31.3,
-        "max_angle_deg": 1.2,
-        "slide_mm": 0.81,
-        "duration_s": 1.75,
-        "max_hinge_deg": 49.7,
+        "land_mm": 2.7,
+        "min_barrel_to_skin_mm": 31.5,
+        "max_angle_deg": 3.5,
+        "slide_mm": 0.65,
+        "duration_s": 1.7,
+        "max_hinge_deg": 49.2,
         "failed": []
       },
       "hallux": {
         "passed": true,
-        "land_mm": 2.1,
+        "land_mm": 1.5,
         "min_barrel_to_skin_mm": 31.5,
-        "max_angle_deg": 1.1,
-        "slide_mm": 0.77,
+        "max_angle_deg": 3.1,
+        "slide_mm": 1.58,
         "duration_s": 1.7,
-        "max_hinge_deg": 49.3,
+        "max_hinge_deg": 48.5,
         "failed": []
       },
       "mth3": {
         "passed": true,
         "land_mm": 2.7,
-        "min_barrel_to_skin_mm": 30.8,
-        "max_angle_deg": 1.1,
-        "slide_mm": 1.64,
-        "duration_s": 1.7,
-        "max_hinge_deg": 49.7,
+        "min_barrel_to_skin_mm": 30.5,
+        "max_angle_deg": 2.6,
+        "slide_mm": 0.63,
+        "duration_s": 1.8,
+        "max_hinge_deg": 51.3,
         "failed": []
       },
       "mth5": {
         "passed": true,
-        "land_mm": 13.9,
-        "min_barrel_to_skin_mm": 30.8,
-        "max_angle_deg": 1.2,
-        "slide_mm": 1.73,
+        "land_mm": 12.7,
+        "min_barrel_to_skin_mm": 30.4,
+        "max_angle_deg": 6.4,
+        "slide_mm": 1.86,
         "duration_s": 1.75,
-        "max_hinge_deg": 53.4,
+        "max_hinge_deg": 51.4,
         "failed": []
       }
     },

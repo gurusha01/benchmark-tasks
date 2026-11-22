@@ -1,13 +1,15 @@
 """Diabetic foot sensation screen with a 10 g monofilament pen on a life-size foot model.
 
-A rigid adult right-foot model stands on a sloped stand on the bench, its sole facing the robots and tipped back 30
-deg. A Neuropen-class monofilament pen (16 mm barrel, 140 mm long, a 38 mm 5.07 / 10 g nylon filament out of its
+A rigid life-size adult right-foot model (a smooth sculpted triangle mesh: heel, medial arch, metatarsal-head pads,
+five toes with pulps; built by make_foot.py) is bolted at its ankle cut to a sloped stand on the bench, its sole
+facing the robots and tipped back 30 deg. A Neuropen-class monofilament pen (16 mm barrel, 140 mm long, a 38 mm 5.07 / 10 g nylon filament out of its
 nose) lies in a two-post cradle in front of the right arm. One of the four test sites carries a yellow callus.
 
 The procedure (IWGDF 2019 / ADA annual foot exam): touch the filament to the plantar hallux and the 1st, 3rd and
 5th metatarsal heads, perpendicular to the skin, pressing until the filament bends (about 1.5 to 2 s in all),
 without sliding it; on a callus, test next to the callus, never on it. The sole is curved, so each site has its own
 normal. The filament is a chain of four rigid links on sprung hinges: it buckles under a near-constant load.
+Touches, depths and angles are measured against the foot's skin mesh.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import numpy as np  # noqa: E402
+from scipy.spatial import ConvexHull, cKDTree  # noqa: E402
 from robokit import _ENV, Slider, _np, _part_state, on_reset, on_step, part, set_visible, write_pose  # noqa: E402
 from yam_arena.task_file import TABLE_TOP  # noqa: E402
 
@@ -69,27 +72,47 @@ FOOT_POS = (0.47, -0.03, TOP + 0.21)        # world position of F's origin (seed
 
 
 def _pad_rot(n):
+    """Site frame [a, b, n]: a along the foot (heel -> toes) in the skin's tangent plane, n the outward normal."""
     n = _nrm(n)
     a = _nrm(np.array([1.0, 0.0, 0.0]) - n[0] * n)
     return np.column_stack([a, np.cross(n, a), n])
 
 
-_D22, _D25, _D20, _D10 = (math.radians(d) for d in (22, 25, 20, 10))
-# site: (skin point in F, outward normal in F, pad length along the foot, pad width, pad thickness)
-SITES = {
-    "hallux": ((0.052, -0.028, -0.004), _nrm((math.tan(_D20), -math.tan(_D10), 1.0)), 0.040, 0.027, 0.020),
-    "mth1": ((0.0, -0.034, -0.0069), _nrm((0.0, -math.sin(_D22), math.cos(_D22))), 0.050, 0.038, 0.030),
-    "mth3": ((0.0, 0.0, 0.0), np.array([0.0, 0.0, 1.0]), 0.050, 0.036, 0.030),
-    "mth5": ((-0.015, 0.036, -0.0089), _nrm((0.0, math.sin(_D25), math.cos(_D25))), 0.044, 0.042, 0.030),
-}
-SITE_NAMES = list(SITES)
-CALLUS_R, CALLUS_H = 0.009, 0.0015          # yellow callus disc on the seeded site, centred on it
+_FM = np.load(pathlib.Path(__file__).resolve().parent / "foot_mesh.npz")   # built by make_foot.py (in F, metres)
+SITE_NAMES = [str(k) for k in _FM["site_names"]]                          # hallux, mth1, mth3, mth5
+SITES = {k: (np.asarray(p, float), _nrm(n)) for k, p, n in zip(SITE_NAMES, _FM["site_p"], _FM["site_n"])}
+SITE_ZONE = 0.018            # a touch belongs to the nearest site within 18 mm (along the skin's tangent plane)
+CALLUS_R, CALLUS_H = 0.009, 0.0015          # yellow callus patch on the seeded site, centred on it
+FOOT_V = _FM["verts"].astype(float) @ RF.T  # skin mesh in the foot part's frame (world axes, origin at F)
+FOOT_N = _FM["normals"].astype(float) @ RF.T
+_TREE = cKDTree(FOOT_V)
 
 
 def _site_world_frame(name):
     """(skin point, rotation [a, b, n]) of a site in the foot part's frame (world axes, origin at F)."""
-    s, n, *_ = SITES[name]
-    return RF @ np.asarray(s, float), RF @ _pad_rot(n)
+    s, n = SITES[name]
+    return RF @ s, RF @ _pad_rot(n)
+
+
+def skin_dist(p_local):
+    """Signed distance (m, negative inside) from a point in the foot part's frame to the skin mesh (1.2 mm vertex
+    spacing), and the skin's outward normal at the nearest vertex. Near the skin the distance is taken along that
+    normal, which is exact to about 0.05 mm on this mesh."""
+    p_local = np.asarray(p_local, float)
+    _, i = _TREE.query(p_local)
+    dv = p_local - FOOT_V[i]
+    s = float(np.dot(dv, FOOT_N[i]))
+    e = float(np.linalg.norm(dv))
+    return (s if e < 0.004 else math.copysign(e, s)), FOOT_N[i]
+
+
+def skin_point(p_local, iters=4):
+    """The skin point nearest ``p_local`` (foot part frame) and the skin's outward normal there."""
+    p = np.asarray(p_local, float)
+    for _ in range(iters):
+        d, n = skin_dist(p)
+        p = p - d * n
+    return p, skin_dist(p)[1]
 
 
 def _obox(c_f, size, color, R_f=None, visual=False):
@@ -99,52 +122,42 @@ def _obox(c_f, size, color, R_f=None, visual=False):
     return spec + (("visual",) if visual else ())
 
 
-FOOT_BOXES, FOOT_COLL = [], []              # robokit specs; colliders (centre, rotation, size) for the scorer
-for _nm, (_s, _n, _la, _lb, _t) in SITES.items():
-    _R = _pad_rot(_n)
-    _c = np.asarray(_s) - _R[:, 2] * _t / 2
-    FOOT_BOXES.append(_obox(_c, (_la, _lb, _t), SKIN, _R))
-for _c, _sz, _col in [((-0.005, 0.003, -0.048), (0.060, 0.090, 0.050), SKIN),       # forefoot core
-                      ((-0.085, 0.008, -0.045), (0.100, 0.075, 0.060), SKIN),       # midfoot (arch recessed 15 mm)
-                      ((-0.160, 0.006, -0.042), (0.060, 0.062, 0.072), SKIN),       # heel
-                      ((0.050, -0.028, -0.030), (0.040, 0.026, 0.024), SKIN2),      # big toe behind its pad
-                      ((-0.055, 0.005, -0.095), (0.230, 0.120, 0.020), DARK)]:      # sloped foot board
-    FOOT_BOXES.append(_obox(_c, _sz, _col))
-FOOT_COLL = [(RF @ np.asarray(b[0]) if False else np.asarray(b[0]), None, np.asarray(b[1])) for b in FOOT_BOXES]
-FOOT_COLL = []
-for _b in FOOT_BOXES:
-    w, x, y, z = _b[3][1]
-    _Rb = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-                    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-                    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
-    FOOT_COLL.append((np.asarray(_b[0]), _Rb, np.asarray(_b[1])))
-
-# stand under the board: a column from the base plate up to the board's back face, and the base plate on the bench
+# stand: the sloped board the foot's ankle cut is bolted to (in F), a column under the board, and the base plate
+FOOT_BOXES = [_obox((-0.055, 0.005, -0.095), (0.230, 0.120, 0.020), DARK)]
 _BACK = RF @ np.array([-0.055, 0.005, -0.105])
 _ZB = TOP - FOOT_POS[2]                      # bench top in the part frame
 _COL_H = _BACK[2] - (_ZB + 0.012) + 0.01
 FOOT_BOXES += [((float(_BACK[0]), float(_BACK[1]), float(_ZB + 0.012 + _COL_H / 2)), (0.05, 0.05, _COL_H), DARK),
                ((float(_BACK[0]), float(_BACK[1]), float(_ZB + 0.006)), (0.22, 0.18, 0.012), DARK)]
+FOOT_COLL = []                               # the stand's boxes (centre, rotation, size) for the barrel check
+for _b in FOOT_BOXES:
+    _q = _b[3][1] if len(_b) > 3 and _b[3] else (1.0, 0.0, 0.0, 0.0)
+    w, x, y, z = _q
+    _Rb = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+    FOOT_COLL.append((np.asarray(_b[0]), _Rb, np.asarray(_b[1])))
 
-# visual shapes: the four callus discs (only the seeded one is shown) first, so they are cyl_0 .. cyl_3
-FOOT_CYL = []
-for _nm in SITE_NAMES:
-    _p, _R = _site_world_frame(_nm)
-    FOOT_CYL.append((tuple((_p + _R[:, 2] * CALLUS_H / 2).tolist()), CALLUS_R, CALLUS_H, CALLUS_C, "Z", "visual",
-                     _quat_wxyz(_R)))
-_QF = _quat_wxyz(RF)
-_QFX = _quat_wxyz(RF @ np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]))   # capsule Z axis along u
-# lesser toes (colliders, capsules along u), then rounded skin over the boxes (visual)
-TOES = [((0.040, 0.000, -0.019), 0.0075, 0.018), ((0.038, 0.017, -0.020), 0.0070, 0.015),
-        ((0.034, 0.031, -0.021), 0.0065, 0.012), ((0.028, 0.044, -0.022), 0.0060, 0.010)]
-for _c, _r, _l in TOES:
-    FOOT_CYL.append((tuple((RF @ np.asarray(_c)).tolist()), _r, _l, SKIN, "Z", "capsule", _QFX))
-for _c, _sc in [((-0.158, 0.006, -0.036), (0.034, 0.033, 0.036)),         # heel
-                ((-0.060, 0.006, -0.055), (0.115, 0.046, 0.026)),         # dorsum
-                ((0.060, -0.028, -0.022), (0.022, 0.0135, 0.012))]:       # tip of the big toe
-    FOOT_CYL.append((tuple((RF @ np.asarray(_c)).tolist()), 1.0, 2.0, SKIN, "Z", "sphere_visual", _QF, _sc))
 
-FOOT = part("foot", pos=FOOT_POS, mass=3.0, color=SKIN, friction=1.0, boxes=FOOT_BOXES, cylinders=FOOT_CYL)
+def _hull(pts_f):
+    P = np.asarray(pts_f, float) @ RF.T
+    return P, ConvexHull(P).simplices
+
+
+# meshes: the skin (drawn), the four callus patches (drawn; only the seeded one is shown), then the colliders: convex
+# tiles on the plantar skin and convex core slabs (not drawn)
+FOOT_MESHES = [("skin", FOOT_V, _FM["faces"], SKIN, "visual", FOOT_N)]
+for _i, _nm in enumerate(SITE_NAMES):
+    FOOT_MESHES.append((f"callus_{_i}", _FM[f"callus_v_{_nm}"].astype(float) @ RF.T, _FM[f"callus_f_{_nm}"], CALLUS_C,
+                        "visual"))
+for _i, _t in enumerate(_FM["tiles"]):
+    FOOT_MESHES.append((f"tile_{_i}", *_hull(_t), SKIN, "convex"))
+_o = 0
+for _i, _k in enumerate(_FM["core_len"]):
+    FOOT_MESHES.append((f"core_{_i}", *_hull(_FM["core"][_o:_o + _k]), SKIN, "convex"))
+    _o += _k
+
+FOOT = part("foot", pos=FOOT_POS, mass=3.0, color=SKIN, friction=1.0, boxes=FOOT_BOXES, meshes=FOOT_MESHES)
 
 # ---- monofilament pen in its cradle ---------------------------------------------------------------------------------
 BARREL_L, BARREL_R = 0.140, 0.008
@@ -237,31 +250,29 @@ def _seg_dist(p, a, b):
 
 
 def site_readings(foot, pen, tip):
-    """Per site: the filament tip in the site's frame (along the foot, across, height of the tip's surface above the
-    skin), the barrel tip's height above the skin plane and the angle (deg) between the pen's axis and the normal."""
-    out = {}
+    """The filament tip's gap to the skin and the skin normal under it, the barrel tip's distance to the skin, the
+    pen's axis, and per site the tip's position in the site's tangent plane (along the foot, across, radius)."""
     tip_l = foot.to_local(tip)
-    bt_l = foot.to_local(pen.to_world((NOSE_X, 0.0, 0.0)))
+    gap, n_tip = skin_dist(tip_l)
+    D = skin_dist(foot.to_local(pen.to_world((NOSE_X, 0.0, 0.0))))[0]
     ax_l = foot.rotation().T @ pen.rotation()[:, 0]
+    out = {}
     for nm in SITE_NAMES:
         p, R = _site_world_frame(nm)
         t = R.T @ (tip_l - p)
-        bt = R.T @ (bt_l - p)
-        ang = math.degrees(math.acos(float(np.clip(-np.dot(ax_l, R[:, 2]), -1.0, 1.0))))
-        _, _, la, lb, _ = SITES[nm]
-        inside = abs(t[0]) <= la / 2 + FIL_R and abs(t[1]) <= lb / 2 + FIL_R
-        out[nm] = dict(a=float(t[0]), b=float(t[1]), gap=float(t[2]) - FIL_R, inside=inside, D=float(bt[2]), ang=ang)
-    return out
+        out[nm] = dict(a=float(t[0]), b=float(t[1]), r=float(math.hypot(t[0], t[1])))
+    return out, dict(gap=gap - FIL_R, n=n_tip, D=D, ax=ax_l)
 
 
 def barrel_clearance(foot, pen) -> float:
-    """Smallest distance (m) from the barrel's surface (and its nose) to the foot model's colliders."""
+    """Smallest distance (m) from the barrel's surface (and its nose) to the foot's skin and its stand."""
     best = 1.0
     for x in np.linspace(-BARREL_L / 2, NOSE_X, 16):
         r = BARREL_R if x <= BARREL_L / 2 else 0.004
         p = foot.to_local(pen.to_world((x, 0.0, 0.0)))
-        for c, Rb, s in FOOT_COLL:
-            best = min(best, _box_dist(Rb.T @ (p - c), s) - r)
+        best = min(best, skin_dist(p)[0] - r)
+        for c, Rb, sz in FOOT_COLL:
+            best = min(best, _box_dist(Rb.T @ (p - c), sz) - r)
     return best
 
 
@@ -300,7 +311,7 @@ def _reset(environment=None) -> None:
     s2 = math.sin(math.pi / 4)
     write_pose(environment, "pen", (CRADLE_X, CRADLE_Y + dp, PEN_Z), (0.0, 0.0, s2, s2))
     for i, nm in enumerate(SITE_NAMES):
-        set_visible("foot", f"body/cyl_{i}", nm == callus)
+        set_visible("foot", f"body/callus_{i}", nm == callus)
 
 
 _reset()
@@ -314,14 +325,13 @@ def _watch(environment) -> None:
     _STATE["tcp"] = _tcps(environment)
     lp, lR = _link_pose(environment, "pen", f"f{FIL_N - 1}")
     tip = lp + lR @ np.array([LINK - FIL_R, 0.0, 0.0])
-    rd = site_readings(foot, pen, tip)
+    rd, g = site_readings(foot, pen, tip)
     hinge = max(abs(v) for v in pen.sliders.values()) if pen.sliders else 0.0
-    _STATE["last"] = dict(tip=tip, rd=rd, hinge=hinge)
+    _STATE["last"] = dict(tip=tip, rd=rd, g=g, hinge=hinge)
     if _STATE["gate"]:
         return
     # gates: callus touched, barrel on the foot, pen off the bench, foot shoved
-    c = rd[_STATE["callus"]]
-    if math.hypot(c["a"], c["b"]) <= CALLUS_R + FIL_R and c["gap"] <= CALLUS_H + TOUCH:
+    if rd[_STATE["callus"]]["r"] <= CALLUS_R + FIL_R and g["gap"] <= CALLUS_H + TOUCH:
         _STATE["gate"] = "filament touched the callus"
     elif barrel_clearance(foot, pen) <= 0.001:
         _STATE["gate"] = "pen barrel touched the foot"
@@ -331,25 +341,25 @@ def _watch(environment) -> None:
         _STATE["gate"] = "foot model moved more than 20 mm"
     if _STATE["gate"]:
         return
-    touching = [nm for nm in SITE_NAMES if rd[nm]["inside"] and rd[nm]["gap"] <= TOUCH]
+    near = min(SITE_NAMES, key=lambda k: rd[k]["r"])
+    touching = g["gap"] <= TOUCH and rd[near]["r"] <= SITE_ZONE
     ep = _STATE["ep"]
     if touching:
-        nm = min(touching, key=lambda k: rd[k]["gap"])
-        r = rd[nm]
-        if ep is None:
-            ep = _STATE["ep"] = dict(site=nm, steps=0, gap=0, land=(r["a"], r["b"]), slide=0.0, minD=1.0, max_ang=0.0,
-                                     buckled_steps=0, switched=False, max_hinge=0.0)
-        if nm != ep["site"]:
+        if ep is None:   # landing: the skin normal under the tip is the normal the angle is checked against
+            ep = _STATE["ep"] = dict(site=near, steps=0, gap=0, land=(rd[near]["a"], rd[near]["b"]), n=g["n"].copy(),
+                                     slide=0.0, minD=1.0, max_ang=0.0, buckled_steps=0, switched=False, max_hinge=0.0)
+        if near != ep["site"]:
             ep["switched"] = True
         r = rd[ep["site"]]
         ep["steps"] += 1 + ep["gap"]
         ep["gap"] = 0
-        ep["minD"] = min(ep["minD"], r["D"])
+        ep["minD"] = min(ep["minD"], g["D"])
         ep["max_hinge"] = max(ep["max_hinge"], math.degrees(hinge))
-        if r["D"] <= D_WINDOW[1]:   # while the filament is bent: slide from the landing point, and the angle
+        if g["D"] <= D_WINDOW[1]:   # while the filament is bent: slide from the landing point, and the angle
             ep["slide"] = max(ep["slide"], math.hypot(r["a"] - ep["land"][0], r["b"] - ep["land"][1]))
             ep["buckled_steps"] += 1
-            ep["max_ang"] = max(ep["max_ang"], r["ang"])
+            ang = math.degrees(math.acos(float(np.clip(-np.dot(g["ax"], ep["n"]), -1.0, 1.0))))
+            ep["max_ang"] = max(ep["max_ang"], ang)
     elif ep is not None:
         ep["gap"] += 1
         if ep["gap"] >= GAP_STEPS:
@@ -399,10 +409,10 @@ def success(objects) -> bool:
 def score(objects) -> float:
     """Score 0 if at any point the filament touches the callus, the pen's barrel touches the foot, the pen falls off
     the bench, or the foot model moves more than 20 mm. Otherwise 0.25 for each site whose first contact was a correct
-    test: the filament tip landed within 8 mm of the site (on the callus site: 2 to 8 mm outside the callus edge), the
-    barrel tip came within 35 mm of the skin (the filament bent) but never closer than 24 mm, the pen's axis stayed
-    within 15 deg of the skin normal and the tip within 3 mm of its landing point while bent, and the contact lasted
-    1.0 to 3.0 s. A site's later contacts never count. Four sites score 0.75 until the pen lies back in its cradle
+    test (a touch belongs to the nearest site within 18 mm): the filament tip landed within 8 mm of the site (on the
+    callus site: 2 to 8 mm outside the callus edge), the barrel tip came within 35 mm of the skin (the filament bent)
+    but never closer than 24 mm, the pen's axis stayed within 15 deg of the skin normal at the landing point and the
+    tip within 3 mm of its landing point while bent, and the contact lasted 1.0 to 3.0 s. A site's later contacts never count. Four sites score 0.75 until the pen lies back in its cradle
     with no gripper centre within 5 cm of it: then 1.0 (success, held 1 s). Doing nothing scores 0."""
     return _update(objects)[0]
 
@@ -421,14 +431,15 @@ def debug_line(objects) -> str:
     L = _STATE.get("last")
     if not L:
         return "no reading"
-    rd = L["rd"]
-    near = min(SITE_NAMES, key=lambda k: math.hypot(rd[k]["a"], rd[k]["b"]))
+    rd, g = L["rd"], L["g"]
+    near = min(SITE_NAMES, key=lambda k: rd[k]["r"])
     pen = objects["pen"]
     tc = (_STATE.get("tcp") or {}).get("right")
     r = rd[near]
     sl = objects["pen"].sliders
-    return (f"near {near} tip a{r['a']*1000:.1f} b{r['b']*1000:.1f} gap{r['gap']*1000:.1f} D{r['D']*1000:.1f} "
-            f"ang{r['ang']:.1f} hinges {[round(math.degrees(v),1) for v in sl.values()]} "
+    ang = math.degrees(math.acos(float(np.clip(-np.dot(g["ax"], g["n"]), -1.0, 1.0))))
+    return (f"near {near} tip a{r['a']*1000:.1f} b{r['b']*1000:.1f} gap{g['gap']*1000:.1f} D{g['D']*1000:.1f} "
+            f"ang{ang:.1f} hinges {[round(math.degrees(v),1) for v in sl.values()]} "
             f"ep {None if not _STATE.get('ep') else (_STATE['ep']['site'], _STATE['ep']['steps'])} "
             f"done {[(k, v['passed']) for k, v in _STATE.get('results', {}).items()]} gate {_STATE.get('gate')} "
             f"score {_update(objects)[0]} pen {np.round(pen.pos*1000,0).tolist()} ax {np.round(pen.rotation()[:,0],2).tolist()} "

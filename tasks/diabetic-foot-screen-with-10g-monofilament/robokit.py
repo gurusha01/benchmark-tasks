@@ -85,6 +85,9 @@ class Part(Box):
     restitution: float = 0.0
     can_sleep: bool = True   # rollrace: False for parts that must start rolling from rest (PhysX sleep otherwise freezes them)
     meta: dict = field(default_factory=dict, compare=False, hash=False)
+    # monofil rev1: triangle meshes (name, points (N, 3), triangles (M, 3), colour, flag[, vertex normals]) in the part
+    # frame; flag "visual" draws it (no collider), "convex" makes it a convex-hull collider that is not drawn
+    meshes: tuple = field(default=(), compare=False, hash=False)
 
     def _check(self) -> None:
         if not self.boxes:
@@ -94,7 +97,7 @@ class Part(Box):
 
 
 def part(name, pos, boxes, mass, yaw=0.0, sliders=(), color=(0.5, 0.5, 0.5), friction=0.8, cylinders=(), inertia=None,
-         ang_damping=1.0, restitution=0.0, can_sleep=True) -> Part:
+         ang_damping=1.0, restitution=0.0, can_sleep=True, meshes=()) -> Part:
     """Build a Part; ``size`` is filled in from the shapes' extent."""
     def cyl_half(spec):
         r, h, axis = spec[1], spec[2], spec[4] if len(spec) > 4 else "Z"
@@ -102,11 +105,12 @@ def part(name, pos, boxes, mass, yaw=0.0, sliders=(), color=(0.5, 0.5, 0.5), fri
 
     half = [np.array(b[1]) / 2 for b in boxes] + [cyl_half(c) for c in cylinders]
     centres = [np.array(b[0]) for b in boxes] + [np.array(c[0]) for c in cylinders]
-    lo = np.min([c - h for c, h in zip(centres, half)], axis=0)
-    hi = np.max([c + h for c, h in zip(centres, half)], axis=0)
+    lo = np.min([c - h for c, h in zip(centres, half)] + [np.asarray(m[1]).min(0) for m in meshes], axis=0)
+    hi = np.max([c + h for c, h in zip(centres, half)] + [np.asarray(m[1]).max(0) for m in meshes], axis=0)
     return Part(name=name, pos=tuple(pos), size=tuple((hi - lo).tolist()), mass=mass, color=color, yaw=yaw,
                 boxes=tuple(boxes), cylinders=tuple(cylinders), sliders=tuple(sliders), friction=friction,
-                inertia=inertia, ang_damping=ang_damping, restitution=restitution, can_sleep=can_sleep)
+                inertia=inertia, ang_damping=ang_damping, restitution=restitution, can_sleep=can_sleep,
+                meshes=tuple(meshes))
 
 
 @dataclass(frozen=True)
@@ -259,10 +263,35 @@ def _spawn_part(prim_path: str, cfg, translation=None, orientation=None, **kwarg
             else:
                 collide(cyl.GetPrim(), color)
 
+    def meshes(path: str, specs):
+        """monofil rev1: triangle meshes; "visual" is drawn only, "convex" is a convex-hull collider, not drawn."""
+        from pxr import Vt
+
+        for mspec in specs:
+            mname, pts, tris, color, flag = mspec[:5]
+            mesh = UsdGeom.Mesh.Define(stage, f"{path}/{mname}")
+            mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(pts, dtype=np.float32)))
+            tris = np.ascontiguousarray(tris, dtype=np.int32)
+            mesh.CreateFaceVertexCountsAttr(Vt.IntArray.FromNumpy(np.full(len(tris), 3, np.int32)))
+            mesh.CreateFaceVertexIndicesAttr(Vt.IntArray.FromNumpy(tris.ravel()))
+            mesh.CreateSubdivisionSchemeAttr("none")
+            mesh.CreateDoubleSidedAttr(True)
+            if len(mspec) > 5 and mspec[5] is not None:
+                mesh.CreateNormalsAttr(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(mspec[5], dtype=np.float32)))
+                mesh.SetNormalsInterpolation("vertex")
+            prim = mesh.GetPrim()
+            if flag == "visual":
+                bind_visual_material(str(prim.GetPath()), look(color), stage=stage)
+                continue
+            collide(prim, color)
+            UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("convexHull")
+            mesh.CreatePurposeAttr(UsdGeom.Tokens.guide)   # collider only: not rendered
+
     main = f"{prim_path}/body"
     body(main, (0.0, 0.0, 0.0), spec.mass, spec.inertia, spec.ang_damping, spec.can_sleep)
     boxes(main, spec.boxes)
     cylinders(main, spec.cylinders)
+    meshes(main, spec.meshes)
     for s in spec.sliders:
         path = f"{prim_path}/{s.name}"
         body(path, s.rest, s.mass, s.inertia)
