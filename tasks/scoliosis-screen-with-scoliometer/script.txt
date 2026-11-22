@@ -1,0 +1,237 @@
+# Scripted demo: scoliometer sweep of the manikin's back, referral slip, scoliometer back in its case.
+#
+# Inputs, all observable: the left wrist camera's images (the ball and the red zero mark on the scoliometer's face),
+# the arms' own joint angles (forward kinematics, also for the wrist camera's pose) and the fixed layout from the
+# setup text (back profile and spine line, case, slip and trays). It never reads the simulator's object poses, the
+# ball's joint, the back's spring or the scorer.
+#
+# 1. Right arm: pinch the scoliometer's two finger pads (the plate then hangs free to roll about the spine axis),
+#    lift it out of its case.
+# 2. Set it on the back at the shoulders, notch over the spine, and slide it 26 cm to the waist following the setup
+#    text's spine profile, pressing about 4 mm into the padded skin. Meanwhile the left arm trails the plate with its
+#    wrist camera on the scale; each frame the ball and the zero mark are cast onto the plate's face, which gives the
+#    reading (median of the last 9 frames); the arm also shifts the pads sideways by the reading so the notch stays over the spine as the plate rolls.
+# 3. Largest reading >= 7 deg: slip into the red REFER tray, else the green PASS tray (left arm); right arm stands
+#    the scoliometer back in its case and lets go.
+import math
+import os
+import numpy as np
+
+TILT = math.radians(40.0)      # right arm's approach tilted 40 deg toward +y about the spine axis
+PRESS = 0.004
+SPEED = 0.015                  # m/s along the spine
+X_START, X_END = 0.210, 0.480
+CAM_OFF = np.array([-0.18, 0.06, 0.12])
+BETA = math.radians(5.0)
+
+
+def pinch_rot(tilt):
+    """TCP rotation: fingers close along world x, approach tilted by ``tilt`` about x toward +y."""
+    Z = np.array([0.0, math.sin(tilt), -math.cos(tilt)])
+    X = np.array([1.0, 0.0, 0.0])
+    return np.column_stack([X, np.cross(Z, X), Z])
+
+
+def look_rot(cam_R_in_tcp, d):
+    """TCP rotation that points the wrist camera along d with the image's up as close to world up as possible."""
+    zc = -np.asarray(d, float) / np.linalg.norm(d)
+    xc = np.cross([0.0, 0.0, 1.0], zc)
+    xc /= np.linalg.norm(xc)
+    Rw = np.column_stack([xc, np.cross(zc, xc), zc])
+    return Rw @ cam_R_in_tcp.T
+
+
+def jmove(arm, pos, rot, duration, seed=None):
+    """Joint-space move to the IK solution (from ``seed``, default READY) of pos/rot, for large re-orientations."""
+    from yam_arena import ik
+    from yam_arena.constants import READY
+
+    q1, pe, _ = ik.solve(np.asarray(pos, float), ik.matrix_to_quat_xyzw(rot),
+                         np.array(READY if seed is None else seed, float), base_pos=arm.base, iters=300)
+    q0 = arm.q.copy()
+    n = max(1, round(duration * CONTROL_HZ))
+    for k in range(1, n + 1):
+        s = ik.smoothstep(k / n)
+        arm.q = q0 + s * (q1 - q0)
+        arm.pos, arm.rot = ik.tcp_pose(arm.q, arm.base)
+        arm.cmd = np.r_[arm.q, arm.grip]
+        yield
+    arm.pos, arm.rot = np.asarray(pos, float), rot
+    arm.worst_mm = max(arm.worst_mm, pe * 1000)
+
+
+def script(task, ctx):
+    from yam_arena import ik, station
+    from yam_arena.urdf import quat_xyzw_to_matrix
+
+    ctx.notes = []
+    A, L = ctx.right, ctx.left
+    A.offset = np.zeros(3)
+    L.offset = np.zeros(3)
+    dump = os.environ.get("DEMO_DUMP")
+
+    def fk(arm):
+        rob = ctx.emb._env.unwrapped.scene[f"{arm.name}_robot"]
+        qa = np.asarray(getattr(rob.data.joint_pos, "torch", rob.data.joint_pos)[0].detach().cpu())[:6]
+        return ik.tcp_pose(qa, arm.base)
+
+    cam = station.wrist_camera("left")
+    CR = quat_xyzw_to_matrix(np.array(cam.rot_xyzw))
+    CP = np.array(cam.pos) - np.array([0.0, 0.0, 0.134])
+    ln = cam.lens
+    D_SP = task.PIVOT_UP - task.FOOT_Y * math.tan(BETA)      # pads above the spine line when seated level
+    A_TICK = task.TICK_R - 0.004                               # centre of the red zero mark from the tube's centre
+
+    def cam_target(boss):
+        f = np.array([boss[0] + task.FACE_X, boss[1], boss[2] - 0.045])
+        pc = f + CAM_OFF
+        R = look_rot(CR, f - pc)
+        return pc - R @ CP, R
+
+    def read(img, boss):
+        """Reading (deg, + = robot-left end high) from the left wrist image, or None."""
+        p, R = fk(L)
+        cp, cr = p + R @ CP, R @ CR
+        H, W = img.shape[:2]
+        g = img.astype(float)
+
+        def project(P):
+            c = cr.T @ (np.asarray(P) - cp)
+            return (ln.cx + ln.fx * c[0] / -c[2]) * W / ln.width - 0.5, (ln.cy - ln.fy * c[1] / -c[2]) * H / ln.height - 0.5
+
+        corners = [project((boss[0] + task.FACE_X, boss[1] + dy, boss[2] + dz)) for dy in (-0.05, 0.05)
+                   for dz in (-0.060, -0.036)]   # the band of the tube and the zero mark, below the fingers
+        u0, u1 = int(max(0, min(c[0] for c in corners))), int(min(W, max(c[0] for c in corners) + 1))
+        v0, v1 = int(max(0, min(c[1] for c in corners))), int(min(H, max(c[1] for c in corners) + 1))
+        if u1 - u0 < 8 or v1 - v0 < 8:
+            return None, "roi"
+        sub = g[v0:v1, u0:u1]
+        red = (sub[..., 0] > 60) & (sub[..., 0] > 3 * sub[..., 1]) & (sub[..., 0] > 3 * sub[..., 2])
+        dark = sub.max(-1) < 60
+        k = max(1, int(round(0.0012 * ln.fx * W / ln.width / 0.17)))   # erode ~1.2 mm: drops the thin ticks
+        er = dark.copy()
+        for du in range(-k, k + 1):
+            for dv in range(-k, k + 1):
+                er &= np.roll(np.roll(dark, du, 1), dv, 0)
+        from scipy import ndimage
+
+        lab, nlab = ndimage.label(er)
+        if red.sum() < 3 or nlab == 0:
+            return None, f"px red {int(red.sum())} ball {int(er.sum())}"
+
+        def cast(mask, x_plane):
+            vv, uu = np.nonzero(mask)
+            u, v = (uu.mean() + u0 + 0.5) * ln.width / W, (vv.mean() + v0 + 0.5) * ln.height / H
+            d = cr @ np.array([(u - ln.cx) / ln.fx, -(v - ln.cy) / ln.fy, -1.0])
+            t = (x_plane - cp[0]) / d[0]
+            return cp + t * d
+
+        xb = fk(A)[0][0]
+        rl, nr = ndimage.label(red)
+        tick = cast(rl == 1 + int(np.argmax(ndimage.sum(red, rl, range(1, nr + 1)))), xb + task.FACE_X - 0.0006)
+        best = None
+        for j, sl in enumerate(ndimage.find_objects(lab), start=1):   # the ball: a round blob just below the mark
+            hh, ww = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+            if not (0.6 <= hh / ww <= 1.7 and (lab[sl] == j).sum() >= 0.5 * hh * ww):
+                continue
+            p = cast(lab == j, xb + task.FACE_X - 0.0035)
+            dz = p[2] - tick[2]   # the ball's centre sits 13 mm below the mark's centre (at 0 to 15 deg: 9.5-13 mm)
+            if -0.020 <= dz <= -0.005 and abs(p[1] - tick[1]) <= 0.06 and (best is None or abs(dz + 0.014) < best[0]):
+                best = (abs(dz + 0.014), p)
+        if best is None:
+            return None, "no ball below the mark"
+        ball = best[1]
+        s = (tick[1] - ball[1]) / A_TICK
+        if abs(s) > 0.6:
+            return None, "range"
+        return math.degrees(math.asin(s)), f"tick {np.round(tick*1000,1).tolist()} ball {np.round(ball*1000,1).tolist()}"
+
+    # --- left arm out of the way; right arm pinches the scoliometer's finger pads in its case --------------------------
+    yield from both(L.move(np.array([0.18, 0.36, 1.00]), L.rot, 1.5), A.set_grip(1.0, 0.5))
+    G = np.array([task.CASE_X, task.CASE_Y, task.GAUGE_Z0])
+    R0 = pinch_rot(0.0)
+    yield from jmove(A, G + np.array([0.0, 0.0, 0.08]), R0, 2.0)
+    yield from goto(ctx, A, G + np.array([0.0, 0.0, 0.08]), R0, 0.5)
+    yield from A.move(G + A.offset, R0, 1.5)
+    yield from wait(0.3)
+    yield from A.set_grip(0.0, 1.0)
+    yield from wait(0.3)
+    yield from A.move(G + A.offset + np.array([0.0, 0.0, 0.12]), R0, 1.2)
+    ctx.notes.append(f"grasp: TCP target {np.round(G*1000,1).tolist()} measured {np.round(fk(A)[0]*1000,1).tolist()} mm")
+
+    # --- to the shoulders, camera on the scale --------------------------------------------------------------------------
+    Rs = pinch_rot(TILT)
+    h = lambda x: task.TOP + task.h_of(x)
+    P0 = np.array([X_START, task.SPINE_Y, h(X_START) + D_SP + 0.04])
+    pl, rl = cam_target(P0)
+    yield from jmove(L, pl, rl, 2.5)
+    yield from jmove(A, P0, Rs, 2.5, seed=A.q)
+    yield from goto(ctx, A, P0, Rs, 0.5)
+    yield from goto(ctx, L, pl, rl, 0.5)
+    ctx.notes.append(f"offsets R {np.round(A.offset*1000,1).tolist()} L {np.round(L.offset*1000,1).tolist()} mm")
+
+    # --- land and sweep --------------------------------------------------------------------------------------------------
+    def boss_at(x, th):
+        return np.array([x, task.SPINE_Y - D_SP * math.sin(th), h(x) + D_SP * math.cos(th) - PRESS])
+
+    P1 = boss_at(X_START, 0.0)
+    yield from A.move(P1 + A.offset, Rs, 1.5)
+    yield from wait(0.5)
+    th, peak, n_ok, log, recent = 0.0, 0.0, 0, [], []
+    n = int(round((X_END - X_START) / SPEED * CONTROL_HZ))
+    for i in range(n + 1):
+        x = X_START + (X_END - X_START) * i / n
+        r, why = read(np.asarray(ctx.obs.images["left_cam"]), fk(A)[0])
+        if r is not None and len(recent) >= 5 and abs(r - float(np.median(recent))) > 2.0:
+            r, why = None, f"jump {r:.1f}"   # the hump turns the plate < 0.3 deg per frame: a jump is a misread
+        if r is not None:
+            n_ok += 1
+            recent = (recent + [r])[-9:]
+            med = float(np.median(recent))   # median of the last 0.45 s: the ball's swing and stray frames drop out
+            th = math.radians(med)
+            peak = max(peak, abs(med)) if i > 10 else peak
+        if i % 10 == 0:
+            log.append((round(x * 1000), None if r is None else round(r, 2), why if r is None else ""))
+        if dump and i % 40 == 0:
+            import imageio
+            imageio.imwrite(f"{dump}_{i:03d}.png", np.asarray(ctx.obs.images["left_cam"]))
+        B = boss_at(x, th)
+        A.aim(B + A.offset, Rs)
+        pl, rl = cam_target(B)
+        L.aim(pl + L.offset, rl)
+        yield
+    refer = peak >= 7.0
+    ctx.notes.append(f"sweep: {n_ok}/{n + 1} frames read, largest reading {peak:.2f} deg -> {'REFER' if refer else 'PASS'}")
+    ctx.notes.append(f"readings (x mm, deg): {log}")
+
+    # --- lift; scoliometer back in its case (right) while the slip goes in its tray (left) ----------------------------
+    yield from A.move(fk(A)[0] + A.offset + np.array([0.0, 0.0, 0.06]), Rs, 1.0)
+
+    def right_home():
+        C = np.array([task.CASE_X, task.CASE_Y, task.GAUGE_Z0 + 0.003])
+        yield from jmove(A, C + np.array([0.0, 0.0, 0.10]), R0, 2.5, seed=A.q)
+        yield from goto(ctx, A, C + np.array([0.0, 0.0, 0.08]), R0, 0.5)
+        yield from wait(1.0)
+        yield from A.move(C + A.offset + np.array([0.0, 0.0, 0.03]), R0, 1.2)
+        yield from A.move(C + A.offset, R0, 0.8)
+        yield from wait(0.3)
+        yield from A.set_grip(1.0, 0.8)
+        yield from A.move(C + A.offset + np.array([0.0, 0.0, 0.12]), R0, 1.2)
+
+    def left_slip():
+        S = np.array([task.SLIP_X, task.SLIP_Y, task.TOP + task.SLIP_SIZE[2] - 0.015])
+        yield from L.set_grip(1.0, 0.3)
+        yield from jmove(L, S + np.array([0.0, 0.0, 0.10]), R0, 2.5, seed=L.q)
+        yield from goto(ctx, L, S + np.array([0.0, 0.0, 0.08]), R0, 0.5)
+        yield from L.move(S + L.offset, R0, 1.2)
+        yield from L.set_grip(0.0, 0.8)
+        yield from L.move(S + L.offset + np.array([0.0, 0.0, 0.10]), R0, 1.0)
+        tx, ty = task.TRAYS["refer" if refer else "pass"]
+        T = np.array([tx, ty, task.TOP + task.TRAY_FLOOR + task.SLIP_SIZE[2] - 0.015 + 0.006])
+        yield from L.move(T + L.offset + np.array([0.0, 0.0, 0.08]), R0, 1.8)
+        yield from L.move(T + L.offset, R0, 1.0)
+        yield from L.set_grip(1.0, 0.6)
+        yield from L.move(T + L.offset + np.array([0.0, 0.0, 0.12]), R0, 1.0)
+
+    yield from both(right_home(), left_slip())
+    yield from wait(2.0)

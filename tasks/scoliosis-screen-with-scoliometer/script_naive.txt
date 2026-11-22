@@ -1,0 +1,26 @@
+# Baseline: naive fixed-tray policy. The left arm picks the slip and puts it in the REFER tray without measuring
+# (the right arm leaves the scoliometer in its case). Same moves as the demo's slip placement.
+import math
+import numpy as np
+
+
+def script(task, ctx):
+    ctx.notes = []
+    L = ctx.left
+    L.offset = np.zeros(3)
+    R0 = np.column_stack([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
+    S = np.array([task.SLIP_X, task.SLIP_Y, task.TOP + task.SLIP_SIZE[2] - 0.015])
+    yield from L.set_grip(1.0, 0.3)
+    yield from L.move(S + np.array([0.0, 0.0, 0.10]), R0, 2.5)
+    yield from goto(ctx, L, S + np.array([0.0, 0.0, 0.08]), R0, 0.5)
+    yield from L.move(S + L.offset, R0, 1.2)
+    yield from L.set_grip(0.0, 0.8)
+    yield from L.move(S + L.offset + np.array([0.0, 0.0, 0.10]), R0, 1.0)
+    tx, ty = task.TRAYS["refer"]
+    T = np.array([tx, ty, task.TOP + task.TRAY_FLOOR + task.SLIP_SIZE[2] - 0.015 + 0.006])
+    yield from L.move(T + L.offset + np.array([0.0, 0.0, 0.08]), R0, 1.8)
+    yield from L.move(T + L.offset, R0, 1.0)
+    yield from L.set_grip(1.0, 0.6)
+    yield from L.move(T + L.offset + np.array([0.0, 0.0, 0.12]), R0, 1.0)
+    while True:
+        yield
